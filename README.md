@@ -57,8 +57,8 @@ Requires **Windows**, **Python 3.12+** on `PATH` as `python`, and Claude Code ru
 once.
 
 ```powershell
-git clone https://github.com/YOUR-USER/claude-code-voice-windows
-cd claude-code-voice-windows
+git clone https://github.com/YOUR-USER/claude-vsc-voice-output
+cd claude-vsc-voice-output
 python install.py
 ```
 
@@ -138,9 +138,7 @@ can be exercised without listening to anything.
 
 ## Credits
 
-Built with [Claude Code](https://claude.com/claude-code). The call-awareness and
-queue-ordering behaviour came out of a code review by Jamison West, who spotted that it
-would happily talk over a meeting.
+Built with [Claude Code](https://claude.com/claude-code).
 
 ## License
 

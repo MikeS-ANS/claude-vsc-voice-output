@@ -197,9 +197,8 @@ finished…"* — so you know which window is talking. Two windows on the same f
 distinguished ("My Project" / "My Project two"). Names only get announced when more than
 one window is live, and `announce_session` can force it `always` or `never`.
 
-> The call and stacking problems were both spotted by
-> Jamison West reviewing an earlier version — the kind
-> of thing you don't notice until someone else looks.
+> The meeting problem in particular is not something you notice until someone reviews it
+> with fresh eyes.
 
 ---
 
