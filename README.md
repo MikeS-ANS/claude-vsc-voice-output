@@ -57,7 +57,7 @@ Requires **Windows**, **Python 3.12+** on `PATH` as `python`, and Claude Code ru
 once.
 
 ```powershell
-git clone https://github.com/YOUR-USER/claude-vsc-voice-output
+git clone https://github.com/MikeS-ANS/claude-vsc-voice-output
 cd claude-vsc-voice-output
 python install.py
 ```
@@ -127,6 +127,19 @@ Two things to know if you work with sensitive data:
   Claude Code conversation already takes. Turn it off with `push_when_away: false`.
 
 ---
+
+## Working on it
+
+The copy that runs lives in `%USERPROFILE%\.claude\hooks`. This repo is the shareable
+source. Two directions, two commands, so it is never ambiguous which one overwrote what:
+
+```powershell
+python install.py           # repo -> live  (deploy)
+python sync-from-live.py    # live -> repo  (report drift; --diff, then --apply)
+```
+
+Iterating on the live copy is faster, so `sync-from-live.py` exists to make the resulting
+drift visible rather than silent.
 
 ## Contributing
 
