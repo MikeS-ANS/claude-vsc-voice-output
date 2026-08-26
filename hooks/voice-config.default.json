@@ -1,0 +1,20 @@
+{
+  "speak": true,
+  "always_speak": true,
+  "toast": true,
+  "idle_seconds": 45,
+  "long_turn_seconds": 60,
+  "engine": "auto",
+  "voice": "af_heart",
+  "fallback_voice": "Mark",
+  "rate": 1.0,
+  "min_turn_seconds": 10,
+  "respect_microphone": true,
+  "max_defer_seconds": 1800,
+  "max_stale_seconds": 0,
+  "announce_session": "auto",
+  "microphone_ignore": [],
+  "respect_lock": true,
+  "push_when_away": true,
+  "away_seconds": 120
+}

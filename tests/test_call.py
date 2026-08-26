@@ -1,0 +1,101 @@
+"""Verify call handling: queue during a call, play the backlog when it ends."""
+import os
+import shutil
+import sys
+import threading
+import time
+
+HOOKS = os.environ.get("CLAUDE_VOICE_HOOKS",
+                       os.path.join(os.path.expanduser("~"), ".claude", "hooks"))
+sys.path.insert(0, HOOKS)
+import voice_lib as vl
+
+# These suites test queue/mic logic, not lock handling, and may run on a
+# locked machine -- pin the lock signal off.
+vl.workstation_locked = lambda: False
+
+spoken = []
+vl.speak = lambda text, cfg=None, guard=None: spoken.append(text)
+
+on_call = {"v": True}
+vl.microphone_users = lambda: ["Cytracom Desktop.exe"] if on_call["v"] else []
+
+HUB = r"c:\Dev\Anchor-Hub"
+STEW = r"c:\Dev\Stewart-HQ"
+CFG = {"respect_microphone": True, "max_defer_seconds": 60,
+       "max_stale_seconds": 0, "announce_session": "auto", "microphone_ignore": []}
+
+
+def reset(live=()):
+    del spoken[:]
+    shutil.rmtree(vl.QUEUE_DIR, ignore_errors=True)
+    for p in (vl.SPEAKER_LOCK, vl.LABELS_PATH):
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
+    for n in list(os.listdir(vl.STATE_DIR)):
+        if n.startswith("turn-"):
+            try:
+                os.unlink(os.path.join(vl.STATE_DIR, n))
+            except OSError:
+                pass
+    for sid in live:
+        with open(vl.turn_stamp_path(sid), "w", encoding="utf-8") as f:
+            f.write(str(time.time()))
+
+
+def enq(text, sid, cwd):
+    return vl.enqueue(text, sid, vl.session_label(sid, cwd))
+
+
+checks = []
+
+# A worker starts waiting during a call; more summaries arrive mid-wait; the
+# call ends; everything queued should be spoken, oldest first.
+reset(live=["A", "B"])
+on_call["v"] = True
+enq("payroll is done", "A", HUB)
+
+def add_more():
+    time.sleep(6)
+    enq("chores updated", "B", STEW)     # arrives while the worker is waiting
+    time.sleep(4)
+    enq("payroll revised", "A", HUB)     # supersedes A's own earlier one
+    time.sleep(4)
+    on_call["v"] = False                 # hang up
+
+threading.Thread(target=add_more, daemon=True).start()
+
+t0 = time.time()
+vl.drain_pending(CFG)
+elapsed = time.time() - t0
+
+joined = " | ".join(spoken)
+checks.append(("waited through the call (%.0fs)" % elapsed, elapsed >= 10))
+checks.append(("spoke everything queued once the call ended", len(spoken) == 2))
+checks.append(("kept the other window's summary", "chores updated" in joined))
+checks.append(("used the newest for the repeating window",
+               "payroll revised" in joined and "payroll is done" not in joined))
+checks.append(("named both windows", "Anchor Hub" in joined and "Stewart HQ" in joined))
+checks.append(("queue is empty afterwards", vl.queue_depth() == 0))
+checks.append(("speaker lock released", not os.path.exists(vl.SPEAKER_LOCK)))
+
+# A second worker must not double-speak while the first is waiting on a call.
+reset(live=["A"])
+on_call["v"] = True
+enq("held", "A", HUB)
+assert vl.become_speaker()
+vl.drain_pending(CFG)
+checks.append(("a second worker stays out of the way while one waits",
+               spoken == [] and vl.queue_depth() == 1))
+vl.release_speaker()
+
+reset()
+print()
+ok = True
+for name, passed in checks:
+    print(("  PASS  " if passed else "  FAIL  ") + name)
+    ok = ok and passed
+print("\nALL PASS" if ok else "\nSOME FAILED")
+sys.exit(0 if ok else 1)

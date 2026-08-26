@@ -1,0 +1,22 @@
+# Logs contain real session content -- spoken summaries name clients, tickets,
+# and whatever else was being worked on. Never commit these.
+*.log
+hooks/*.log
+
+# The live config is personal (chosen voice, thresholds). The tracked copy is
+# voice-config.default.json, which the installer copies into place.
+hooks/voice-config.json
+
+# Anthropic's logo. The installer copies it from the locally installed VS Code
+# extension instead, so this repo does not redistribute someone else's mark.
+hooks/claude-logo.png
+
+# Python environment: ~140MB and machine-specific.
+.venv/
+hooks/.venv/
+__pycache__/
+*.pyc
+
+# Synthesised audio and scratch files
+*.wav
+*.tmp
