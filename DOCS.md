@@ -223,6 +223,54 @@ one window is live, and `announce_session` can force it `always` or `never`.
 
 ---
 
+## When you've walked away: the phone
+
+Holding a summary is only half an answer. If you are away, speech is queued and reaches
+nobody — so it goes to your phone instead.
+
+This needs **Remote Control** connected: `/rc` in the Claude Code prompt box, or
+`remoteControlAtStartup: true` in `settings.json` to connect every session automatically.
+Without it there is nowhere for a notification to go.
+
+### How it decides you're away
+
+Locked screen is definitive. Otherwise `away_seconds` (120) of no keyboard or mouse — input
+driven from a phone never touches this machine's input devices, so an idle desktop with an
+active session is a good signal you are elsewhere.
+
+### Why it needs enforcing
+
+Speech is driven by a hook, so it happens whether or not the model cooperates. A phone push
+is different: **no hook can send one.** Only Claude can, by calling its notification tool.
+That makes it a request rather than a guarantee — and a request the model can quietly drop.
+
+So it is enforced the same way the summary is. The `UserPromptSubmit` hook notices you are
+away and asks for a push plus a marker:
+
+```html
+<!-- PUSHED -->
+```
+
+The `Stop` hook then refuses to end the turn if you are away and that marker is absent. A
+deliberate `<!-- PUSHED: skipped -->` is accepted for a reply not worth a notification.
+One block per turn, so a turn can always finish.
+
+### What it will not do
+
+Claude Code skips a push while you are actively at the terminal, on the reasoning that the
+reply already reached you. That is not configurable, and it means the push channel is
+reserved for genuine absence — you cannot opt into a notification for every turn.
+
+```powershell
+python voice-toggle.py            # includes whether you currently read as away
+```
+
+Turn it off with `push_when_away: false`. Note the notification travels through Anthropic's
+Remote Control, the same path your conversation already takes — unlike speech, which never
+leaves the machine.
+
+---
+
 ## Toast notifications
 
 When Claude needs your input you get a chime plus a Windows toast that stays until
@@ -274,6 +322,8 @@ python voice-setup-toast.py --remove    # unregister
 | `fallback_voice` | Windows voice, used only if Kokoro fails |
 | `rate` | Speed multiplier. `1.0` normal, `1.15` brisker |
 | `respect_lock` | Hold speech while the screen is locked. Keep this `true` |
+| `push_when_away` | Send the summary to your phone when you are away from the machine |
+| `away_seconds` | Idle time that counts as away, when the screen is unlocked (120) |
 | `respect_microphone` | Hold speech while any app holds the mic. Keep this `true` |
 | `microphone_ignore` | Apps to ignore because they hold the mic all day. Empty by default |
 | `announce_session` | `auto` (name windows only when several are live), `always`, `never` |
