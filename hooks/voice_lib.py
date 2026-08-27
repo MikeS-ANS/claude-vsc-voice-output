@@ -12,7 +12,8 @@ import time
 from xml.sax.saxutils import escape as xml_escape
 
 HOOKS_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(HOOKS_DIR, "voice-config.json")
+CONFIG_PATH = os.environ.get("CLAUDE_VOICE_CONFIG",
+                             os.path.join(HOOKS_DIR, "voice-config.json"))
 STATE_DIR = os.environ.get("CLAUDE_VOICE_STATE",
                            os.path.join(tempfile.gettempdir(), "claude_voice"))
 LOCK_PATH = os.path.join(STATE_DIR, "speak.lock")
@@ -763,10 +764,15 @@ def hold_reason(cfg=None):
 
 
 # --- Utterance queue --------------------------------------------------------
-# One slot PER SESSION. Two quick turns in the same window are the same work
-# superseding itself, so the newer summary replaces the older. Two summaries
-# from different windows are independent work, so both are kept and played in
-# arrival order -- nothing you have not heard is thrown away.
+# Every summary is kept and played in arrival order. Nothing is collapsed:
+# each turn's summary describes that turn's work, so a newer one does not
+# contain what an older one said, and discarding the older loses information
+# rather than merely delaying it.
+#
+# Bounded per session by max_queued_per_session, so an hour away with several
+# windows working cannot turn into unbounded narration. When that cap is hit the
+# OLDEST summary for that session is dropped and logged -- if something has to
+# go, it should be the least current thing.
 
 QUEUE_DIR = os.path.join(STATE_DIR, "queue")
 LABELS_PATH = os.path.join(STATE_DIR, "labels.json")
@@ -833,30 +839,36 @@ def session_label(session_id, cwd=""):
     return labels[sid]
 
 
-def _slot(session_id):
-    return os.path.join(queue_dir(), "q-" + safe_id(session_id) + ".json")
+def _slot(session_id, created):
+    """A unique filename per summary, ordered by arrival.
+
+    Unique per write on purpose: several hooks can fire milliseconds apart, and
+    a shared name is how a summary got silently lost once already.
+    """
+    stamp = ("%.6f" % float(created)).replace(".", "")
+    return os.path.join(queue_dir(),
+                        "q-%s-%s-%d.json" % (safe_id(session_id), stamp, os.getpid()))
 
 
 def enqueue(text, session_id="default", label="", created=None):
-    """Add or replace this session's queued summary.
+    """Queue a summary. Never replaces an existing one.
 
     created preserves an item's original arrival time when it is put back after
-    a deferral, so it keeps its place in the queue order instead of being
-    treated as brand new.
+    a deferral, so it keeps its place in the order rather than going to the back.
     """
     d = queue_dir()
-    payload = json.dumps({"text": text,
-                          "created": time.time() if created is None else created,
+    when = time.time() if created is None else float(created)
+    payload = json.dumps({"text": text, "created": when,
                           "label": label, "session": safe_id(session_id)})
+    target = _slot(session_id, when)
     fd, tmp = tempfile.mkstemp(prefix="stage-", suffix=".tmp", dir=d)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(payload)
-        # Unique staging name per process: several hooks can fire milliseconds
-        # apart, and a shared temp name makes the rename fail on Windows.
         for _ in range(6):
             try:
-                os.replace(tmp, _slot(session_id))
+                os.replace(tmp, target)
+                _trim_session(session_id)
                 return True
             except PermissionError:
                 time.sleep(0.05)
@@ -869,6 +881,24 @@ def enqueue(text, session_id="default", label="", created=None):
         try:
             if os.path.exists(tmp):
                 os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _trim_session(session_id, cfg=None):
+    """Keep a runaway window from queueing narration without limit."""
+    cfg = cfg or load_config()
+    cap = int(cfg.get("max_queued_per_session", 10) or 0)
+    if cap <= 0:
+        return
+    sid = safe_id(session_id)
+    mine = [i for i in queue_items() if i.get("session") == sid]
+    excess = len(mine) - cap
+    for item in mine[:max(0, excess)]:          # queue_items() is oldest-first
+        try:
+            os.unlink(item["_path"])
+            log_problem("queue for %s hit %d; dropped the oldest summary"
+                        % (item.get("label") or sid, cap))
         except OSError:
             pass
 
@@ -913,24 +943,9 @@ def dequeue_oldest():
 
 
 def requeue(item):
-    """Put a deferred summary back, unless a newer one arrived while it rendered.
-
-    Within a session the newest summary always wins -- that is the whole point
-    of one slot per session. Synthesis takes several seconds, which is long
-    enough for that window to finish another turn, so a summary that was already
-    in flight must not overwrite a fresher one on its way back to the queue.
-    Returns True if it was requeued, False if something newer won.
-    """
-    session = item.get("session", "default")
-    created = item.get("created") or 0
-    try:
-        with open(_slot(session), "r", encoding="utf-8") as f:
-            waiting = json.load(f)
-        if (waiting.get("created") or 0) >= created:
-            return False
-    except (OSError, ValueError):
-        pass                                   # nothing queued, so put it back
-    return enqueue(item.get("text", ""), session, item.get("label", ""), created)
+    """Put a deferred summary back, keeping its original place in the order."""
+    return enqueue(item.get("text", ""), item.get("session", "default"),
+                   item.get("label", ""), item.get("created"))
 
 
 def become_speaker():
@@ -1056,11 +1071,9 @@ def drain_pending(cfg=None):
             if result == "deferred":
                 # Held mid-synthesis. Put it back, unless this window produced a
                 # newer summary in the meantime -- then the newer one stands.
-                kept = requeue(item)
-                log_problem("held mid-synthesis (%s); %s"
-                            % (hold_reason(cfg) or "unknown",
-                               "requeued a summary" if kept
-                               else "dropped it, a newer one is already queued"))
+                requeue(item)
+                log_problem("held mid-synthesis (%s); requeued a summary"
+                            % (hold_reason(cfg) or "unknown"))
                 return
             heard_labels.add(label)
     finally:

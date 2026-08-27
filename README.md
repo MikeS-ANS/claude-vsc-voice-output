@@ -44,10 +44,11 @@ there is one.
 | **While you're on a call** | Silent. Holds the summary and speaks it when you hang up |
 | **While your screen is locked** | Silent. Holds it until you unlock |
 | **When you've walked away** | Pushes a one-line version to your phone instead |
-| **With several windows open** | Each summary is named by its project, played in order |
+| **With several windows open** | Every summary is named by its project and played in order |
 | **Subagents** | Silent |
 
-Nothing is ever discarded. A summary you haven't heard waits its turn.
+Nothing is collapsed or discarded — each turn's summary is different information, so a
+summary you haven't heard waits its turn rather than being superseded.
 
 ---
 

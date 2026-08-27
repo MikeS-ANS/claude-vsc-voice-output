@@ -148,11 +148,12 @@ vl._synth_kokoro = synth_then_newer
 vl.drain_pending(CFG)
 vl._synth_kokoro = real_synth
 
-survivor = vl.queue_items()[0] if vl.queue_depth() else {}
+queued = [(i.get("text") or "") for i in vl.queue_items()]
 checks.append(("deferred while a newer summary arrived: nothing played", played == []))
-checks.append(("...exactly one summary is queued", vl.queue_depth() == 1))
-checks.append(("...and it is the NEWER one",
-               "newer one that landed meanwhile" in (survivor.get("text") or "")))
+checks.append(("...BOTH summaries are queued, neither lost", len(queued) == 2))
+checks.append(("...the deferred one keeps its earlier place",
+               "stale one that was already rendering" in queued[0]
+               and "newer one that landed meanwhile" in queued[1]))
 
 # The opposite case: nothing newer arrived, so the deferred one must come back.
 reset(arm=True)

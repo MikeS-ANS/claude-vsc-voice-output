@@ -16,7 +16,7 @@ HOOKS = os.environ.get(
 sys.path.insert(0, HOOKS)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import voice_lib as vl
-from _isolate import isolate
+from _isolate import isolate, set_config
 
 isolate(vl)                         # private state dir; no cross-suite leakage
 
@@ -70,13 +70,17 @@ checks.append(("...in arrival order", spoken[0].endswith("payroll report is done
 checks.append(("...each named by its project", spoken[0].startswith("Anchor Hub")
                and spoken[1].startswith("Stewart HQ")))
 
-# 2. same window, three quick turns -> only the newest survives
+# 2. same window, three quick turns -> ALL are heard, oldest first.
+# Each turn's summary describes different work, so collapsing loses information.
 reset(live=["A"])
 for t in ("first pass", "second pass", "third pass"):
     enq(t, "A", HUB)
+    time.sleep(0.01)
 vl.drain_pending(CFG)
-checks.append(("one window: rapid turns collapse to the newest",
-               len(spoken) == 1 and "third pass" in spoken[0]))
+checks.append(("one window: every turn is heard, none collapsed",
+               len(spoken) == 3))
+checks.append(("...in the order they happened",
+               "first pass" in spoken[0] and "third pass" in spoken[2]))
 
 # 3. single window -> no name announced (nothing to disambiguate)
 reset(live=["A"])
@@ -102,16 +106,33 @@ vl.session_label("B", HUB)
 checks.append(("a window keeps its name across turns",
                vl.session_label("A", HUB) == first))
 
-# 6. mixed: A collapses, B is preserved
+# 6. mixed windows: everything is heard, interleaved by arrival time
 reset(live=["A", "B"])
-enq("A old", "A", HUB)
+enq("A first", "A", HUB)
+time.sleep(0.01)
 enq("B only", "B", STEW)
-enq("A new", "A", HUB)
+time.sleep(0.01)
+enq("A second", "A", HUB)
 vl.drain_pending(CFG)
 joined = " | ".join(spoken)
-checks.append(("A collapses while B survives",
-               len(spoken) == 2 and "A new" in joined and "B only" in joined
-               and "A old" not in joined))
+checks.append(("two windows interleaved: all three heard",
+               len(spoken) == 3 and "A first" in joined and "B only" in joined
+               and "A second" in joined))
+checks.append(("...in arrival order across windows",
+               "A first" in spoken[0] and "B only" in spoken[1]
+               and "A second" in spoken[2]))
+
+# 6b. the per-session cap stops a runaway window narrating without limit
+reset(live=["A"])
+set_config(vl, max_queued_per_session=3)      # enqueue trims as it writes
+for n in range(6):
+    enq("summary %d" % n, "A", HUB)
+    time.sleep(0.01)
+vl.drain_pending(CFG)
+set_config(vl, max_queued_per_session=10)
+checks.append(("a runaway window is capped", len(spoken) == 3))
+checks.append(("...keeping the most recent, dropping the oldest",
+               "summary 5" in spoken[-1] and not any("summary 0" in x for x in spoken)))
 
 # 7. on a call -> summaries stay queued, none lost
 reset(live=["A", "B"])

@@ -23,7 +23,9 @@ from _isolate import isolate
 
 isolate(vl)                         # private state dir; no cross-suite leakage
 
-CFG_PATH = os.path.join(HOOKS, "voice-config.json")
+# The isolated config from isolate(), not the user's real one -- this suite
+# rewrites it repeatedly, and the spawned hook reads it via CLAUDE_VOICE_CONFIG.
+CFG_PATH = vl.CONFIG_PATH
 SID = "enforce-test"
 
 SUMMARY = "<!-- SPEAK\nAll done here.\nSPEAK -->"

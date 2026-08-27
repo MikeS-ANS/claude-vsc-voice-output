@@ -72,7 +72,7 @@ def add_more():
     time.sleep(6)
     enq("chores updated", "B", STEW)     # arrives while the worker is waiting
     time.sleep(4)
-    enq("payroll revised", "A", HUB)     # supersedes A's own earlier one
+    enq("payroll revised", "A", HUB)     # a SECOND turn from the same window
     time.sleep(4)
     on_call["v"] = False                 # hang up
 
@@ -84,10 +84,11 @@ elapsed = time.time() - t0
 
 joined = " | ".join(spoken)
 checks.append(("waited through the call (%.0fs)" % elapsed, elapsed >= 10))
-checks.append(("spoke everything queued once the call ended", len(spoken) == 2))
+checks.append(("spoke everything queued once the call ended", len(spoken) == 3))
 checks.append(("kept the other window's summary", "chores updated" in joined))
-checks.append(("used the newest for the repeating window",
-               "payroll revised" in joined and "payroll is done" not in joined))
+checks.append(("kept BOTH turns from the same window",
+               "payroll is done" in joined and "payroll revised" in joined))
+checks.append(("...oldest first", spoken[0].endswith("payroll is done")))
 checks.append(("named both windows", "Anchor Hub" in joined and "Stewart HQ" in joined))
 checks.append(("queue is empty afterwards", vl.queue_depth() == 0))
 checks.append(("speaker lock released", not os.path.exists(vl.SPEAKER_LOCK)))

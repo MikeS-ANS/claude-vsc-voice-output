@@ -32,7 +32,34 @@ def isolate(vl, keep=False):
 
     os.makedirs(vl.QUEUE_DIR, exist_ok=True)
 
+    # A private config too, so a suite can set thresholds without touching the
+    # user's real settings, and so anything it spawns reads the same values.
+    cfg_path = os.path.join(root, "voice-config.json")
+    default = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "hooks", "voice-config.default.json")
+    try:
+        shutil.copy2(default, cfg_path)
+    except OSError:
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            f.write("{}")
+    os.environ["CLAUDE_VOICE_CONFIG"] = cfg_path
+    vl.CONFIG_PATH = cfg_path
+
     if not keep:
         import atexit
         atexit.register(lambda: shutil.rmtree(root, ignore_errors=True))
     return root
+
+
+def set_config(vl, **values):
+    """Change the isolated config, as the product code will read it."""
+    import json
+    try:
+        with open(vl.CONFIG_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        cfg = {}
+    cfg.update(values)
+    with open(vl.CONFIG_PATH, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(cfg, f, indent=2)
+    return cfg

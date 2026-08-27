@@ -16,5 +16,6 @@
   "microphone_ignore": [],
   "respect_lock": true,
   "push_when_away": true,
-  "away_seconds": 120
+  "away_seconds": 120,
+  "max_queued_per_session": 10
 }

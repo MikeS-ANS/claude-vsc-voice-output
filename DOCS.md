@@ -199,12 +199,18 @@ goes back on the queue.
 
 ### You're working in another window
 
-Every session gets **its own queue slot**, and they play in arrival order. Two windows
-finishing together means you hear both.
+**Every summary is kept and played in arrival order.** Two windows finishing together
+means you hear both. Two turns in the *same* window means you hear both of those too.
 
-Within a single session, a newer summary *replaces* an older unspoken one — that's the
-same work superseding itself, not new information. Across sessions nothing is ever
-dropped.
+Nothing is collapsed, and that is a deliberate reversal of an earlier design. Each turn's
+summary describes that turn's work, so a newer one does not contain what an older one
+said — discarding the older loses information rather than merely delaying it. The earlier
+"newest wins within a window" behaviour was wrong for that reason.
+
+The cost is honest: come back after an hour with several windows working and you will
+hear a real backlog, one summary at a time. `max_queued_per_session` (10) bounds it, and
+when a single window exceeds that the **oldest** of its summaries is dropped and logged —
+if something has to go, it should be the least current thing.
 
 Each summary is announced with its project name — *"My Project. The payroll report is
 finished…"* — so you know which window is talking. Two windows on the same folder get
@@ -273,6 +279,7 @@ python voice-setup-toast.py --remove    # unregister
 | `announce_session` | `auto` (name windows only when several are live), `always`, `never` |
 | `max_defer_seconds` | Give up waiting out a call after this long (1800) |
 | `max_stale_seconds` | Discard summaries older than this. `0` means never discard |
+| `max_queued_per_session` | Cap on unheard summaries per window; oldest dropped past it (10) |
 
 ### Only used when `always_speak` is `false`
 
