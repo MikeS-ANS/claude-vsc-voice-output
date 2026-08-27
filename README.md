@@ -153,6 +153,10 @@ can be exercised without listening to anything.
 
 Built with [Claude Code](https://claude.com/claude-code).
 
+Reviewed by **Jamison West**, who found the meeting problem, the queue-ordering problem,
+and then a microphone gate that would have silenced speech permanently on his own machine —
+plus a test that had been passing without ever reaching the thing it existed to test.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

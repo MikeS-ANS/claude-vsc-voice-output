@@ -7,10 +7,21 @@ import subprocess
 import sys
 import time
 
-HOOKS = os.environ.get("CLAUDE_VOICE_HOOKS",
-                       os.path.join(os.path.expanduser("~"), ".claude", "hooks"))
+# Prefer the hooks in this checkout, so the suite exercises the code you are
+# looking at rather than whatever happens to be installed. Falls back to the
+# installed copy, and CLAUDE_VOICE_HOOKS overrides both.
+_REPO_HOOKS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "hooks")
+HOOKS = os.environ.get(
+    "CLAUDE_VOICE_HOOKS",
+    _REPO_HOOKS if os.path.isfile(os.path.join(_REPO_HOOKS, "voice_lib.py"))
+    else os.path.join(os.path.expanduser("~"), ".claude", "hooks"))
 sys.path.insert(0, HOOKS)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import voice_lib as vl
+from _isolate import isolate
+
+isolate(vl)                         # private state dir; no cross-suite leakage
 
 CFG_PATH = os.path.join(HOOKS, "voice-config.json")
 SID = "enforce-test"
@@ -40,7 +51,6 @@ def fresh():
         f.write(str(time.time() - 5))
 
 
-vl.state_dir()                      # a fresh clone has no state dir yet
 
 # A fresh clone has no live config -- only the shipped default. Seed one so the
 # suite can run before install.py has ever been executed.

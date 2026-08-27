@@ -4,16 +4,26 @@ import shutil
 import sys
 import time
 
-HOOKS = os.environ.get("CLAUDE_VOICE_HOOKS",
-                       os.path.join(os.path.expanduser("~"), ".claude", "hooks"))
+# Prefer the hooks in this checkout, so the suite exercises the code you are
+# looking at rather than whatever happens to be installed. Falls back to the
+# installed copy, and CLAUDE_VOICE_HOOKS overrides both.
+_REPO_HOOKS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "hooks")
+HOOKS = os.environ.get(
+    "CLAUDE_VOICE_HOOKS",
+    _REPO_HOOKS if os.path.isfile(os.path.join(_REPO_HOOKS, "voice_lib.py"))
+    else os.path.join(os.path.expanduser("~"), ".claude", "hooks"))
 sys.path.insert(0, HOOKS)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import voice_lib as vl
+from _isolate import isolate
+
+isolate(vl)                         # private state dir; no cross-suite leakage
 
 spoken = []
 vl.speak = lambda text, cfg=None, guard=None: spoken.append(text)
 vl.microphone_in_use = lambda cfg=None: False
 vl.microphone_blockers = lambda cfg=None: []
-vl.state_dir()                      # a fresh clone has no state dir yet
 
 locked = {"v": True}
 vl.workstation_locked = lambda: locked["v"]

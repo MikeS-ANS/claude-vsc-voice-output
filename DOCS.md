@@ -94,11 +94,15 @@ This trips people up, so it's worth stating plainly:
 
 | Layer | What's in it | When it's read |
 | --- | --- | --- |
-| `settings.json` | **Which hooks exist** | Once, at session start — needs a new session |
+| `settings.json` | **Which hooks exist** | Usually picked up immediately; start a new session if not |
 | `voice-config.json` + the `.py` files | **All behaviour**: voice, speed, on/off, logic | Fresh on every single invocation — instant, everywhere |
 
-So changing your voice or muting speech is instant. Only adding or removing a hook
-requires starting a new session.
+So changing your voice or muting speech is instant.
+
+Adding or removing a hook is the one change that might need a new session — the docs say
+`settings.json` is read at startup, but on two machines so far the hooks began firing in
+the very session that installed them. Claude Code also has a `ConfigChange` hook event,
+which suggests it watches config files. Treat a restart as the fallback, not the rule.
 
 ---
 
@@ -207,8 +211,9 @@ finished…"* — so you know which window is talking. Two windows on the same f
 distinguished ("My Project" / "My Project two"). Names only get announced when more than
 one window is live, and `announce_session` can force it `always` or `never`.
 
-> The meeting problem in particular is not something you notice until someone reviews it
-> with fresh eyes.
+> The meeting problem is not something you notice until someone reviews it with fresh
+> eyes — credit to Jamison West, who also found that an app can hold the microphone for
+> weeks, which turns this gate from a courtesy into a permanent mute.
 
 ---
 

@@ -4,15 +4,25 @@ import shutil
 import sys
 import time
 
-HOOKS = os.environ.get("CLAUDE_VOICE_HOOKS",
-                       os.path.join(os.path.expanduser("~"), ".claude", "hooks"))
+# Prefer the hooks in this checkout, so the suite exercises the code you are
+# looking at rather than whatever happens to be installed. Falls back to the
+# installed copy, and CLAUDE_VOICE_HOOKS overrides both.
+_REPO_HOOKS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "hooks")
+HOOKS = os.environ.get(
+    "CLAUDE_VOICE_HOOKS",
+    _REPO_HOOKS if os.path.isfile(os.path.join(_REPO_HOOKS, "voice_lib.py"))
+    else os.path.join(os.path.expanduser("~"), ".claude", "hooks"))
 sys.path.insert(0, HOOKS)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import voice_lib as vl
+from _isolate import isolate
+
+isolate(vl)                         # private state dir; no cross-suite leakage
 
 # These suites test queue/mic logic, not lock handling, and may run on a
 # locked machine -- pin the lock signal off.
 vl.workstation_locked = lambda: False
-vl.state_dir()                      # a fresh clone has no state dir yet
 
 HUB = r"c:\Dev\Anchor-Hub"
 CFG = {"respect_microphone": True, "max_defer_seconds": 10, "max_stale_seconds": 0,
@@ -117,6 +127,49 @@ vl.enqueue("gate disabled", "A", "Anchor Hub")
 vl.drain_pending({"respect_microphone": False, "max_defer_seconds": 10,
                   "max_stale_seconds": 0, "announce_session": "auto"})
 checks.append(("mic gate off: plays regardless", len(played) == 1))
+
+# A newer summary from the same window arriving DURING synthesis must win: the
+# deferred one is older, and one slot per session means newest supersedes.
+reset(arm=True)
+vl.enqueue("the stale one that was already rendering", "A", "Anchor Hub")
+
+
+def synth_then_newer(txt, wav, voice, rate):
+    """Synthesise, and have that window finish another turn while we do."""
+    synths["n"] += 1
+    mic["busy"] = True                      # forces the guard to defer
+    vl.enqueue("the newer one that landed meanwhile", "A", "Anchor Hub")
+    open(wav, "wb").write(b"x")
+    return True
+
+
+real_synth = vl._synth_kokoro
+vl._synth_kokoro = synth_then_newer
+vl.drain_pending(CFG)
+vl._synth_kokoro = real_synth
+
+survivor = vl.queue_items()[0] if vl.queue_depth() else {}
+checks.append(("deferred while a newer summary arrived: nothing played", played == []))
+checks.append(("...exactly one summary is queued", vl.queue_depth() == 1))
+checks.append(("...and it is the NEWER one",
+               "newer one that landed meanwhile" in (survivor.get("text") or "")))
+
+# The opposite case: nothing newer arrived, so the deferred one must come back.
+reset(arm=True)
+vl.enqueue("nothing newer arrived", "A", "Anchor Hub")
+vl.drain_pending(CFG)
+back = vl.queue_items()[0] if vl.queue_depth() else {}
+checks.append(("deferred with no newer summary: it is put back",
+               "nothing newer arrived" in (back.get("text") or "")))
+
+# Requeueing keeps the original arrival time, so it holds its place in order.
+reset()
+vl.enqueue("first in", "A", "Anchor Hub")
+original = vl.queue_items()[0]
+vl.requeue(dict(original, text="first in"))
+after = vl.queue_items()[0]
+checks.append(("a requeue keeps the original arrival time",
+               abs((after.get("created") or 0) - (original.get("created") or 0)) < 0.001))
 
 vl._play_wav = real_play
 reset()

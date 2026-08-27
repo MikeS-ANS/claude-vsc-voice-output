@@ -337,7 +337,8 @@ def main():
     verify()
 
     print("""
-Done. Start a NEW Claude Code session -- hook registration is read at startup.
+Done. The hooks usually start working straight away. If nothing happens on your
+next turn, start a new Claude Code session.
 
   python %s\\voice-toggle.py          see what is on
   python %s\\voice-voices.py --audition   pick a voice

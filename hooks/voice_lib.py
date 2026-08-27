@@ -13,7 +13,8 @@ from xml.sax.saxutils import escape as xml_escape
 
 HOOKS_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HOOKS_DIR, "voice-config.json")
-STATE_DIR = os.path.join(tempfile.gettempdir(), "claude_voice")
+STATE_DIR = os.environ.get("CLAUDE_VOICE_STATE",
+                           os.path.join(tempfile.gettempdir(), "claude_voice"))
 LOCK_PATH = os.path.join(STATE_DIR, "speak.lock")
 
 DEFAULTS = {
@@ -699,10 +700,14 @@ def mic_app_label(name):
     return leaf[:-4] if leaf.lower().endswith(".exe") else leaf
 
 
-# Apps that hold the microphone continuously rather than only during a call.
-# A softphone or dictation tool keeps the device open all day, so treating any
-# mic use as "on a call" would silence speech permanently.
-ALWAYS_ON_MIC_APPS = ("cytracom", "wisprflow", "nvidia", "voicemeeter", "obs")
+# Deliberately empty. Whether an app holding the mic means "on a call" or
+# "always open" is a per-machine fact, not a property of the app: a dictation
+# tool that releases cleanly is the single best signal the user is talking right
+# now, so ignoring it guarantees talking over them -- while the same app on
+# another machine may hold the device for days. install.py detects actual
+# always-on holders by how long they have held it and asks. Populate
+# microphone_ignore per machine, never from a shipped list.
+ALWAYS_ON_MIC_APPS = ()
 
 
 def microphone_blockers(cfg=None):
@@ -832,10 +837,16 @@ def _slot(session_id):
     return os.path.join(queue_dir(), "q-" + safe_id(session_id) + ".json")
 
 
-def enqueue(text, session_id="default", label=""):
-    """Add or replace this session's queued summary."""
+def enqueue(text, session_id="default", label="", created=None):
+    """Add or replace this session's queued summary.
+
+    created preserves an item's original arrival time when it is put back after
+    a deferral, so it keeps its place in the queue order instead of being
+    treated as brand new.
+    """
     d = queue_dir()
-    payload = json.dumps({"text": text, "created": time.time(),
+    payload = json.dumps({"text": text,
+                          "created": time.time() if created is None else created,
                           "label": label, "session": safe_id(session_id)})
     fd, tmp = tempfile.mkstemp(prefix="stage-", suffix=".tmp", dir=d)
     try:
@@ -899,6 +910,27 @@ def dequeue_oldest():
     except OSError:
         pass
     return item
+
+
+def requeue(item):
+    """Put a deferred summary back, unless a newer one arrived while it rendered.
+
+    Within a session the newest summary always wins -- that is the whole point
+    of one slot per session. Synthesis takes several seconds, which is long
+    enough for that window to finish another turn, so a summary that was already
+    in flight must not overwrite a fresher one on its way back to the queue.
+    Returns True if it was requeued, False if something newer won.
+    """
+    session = item.get("session", "default")
+    created = item.get("created") or 0
+    try:
+        with open(_slot(session), "r", encoding="utf-8") as f:
+            waiting = json.load(f)
+        if (waiting.get("created") or 0) >= created:
+            return False
+    except (OSError, ValueError):
+        pass                                   # nothing queued, so put it back
+    return enqueue(item.get("text", ""), session, item.get("label", ""), created)
 
 
 def become_speaker():
@@ -1022,10 +1054,13 @@ def drain_pending(cfg=None):
 
             result = speak(announced, cfg, guard=guard)
             if result == "deferred":
-                # The mic went busy during synthesis. Put it back untouched.
-                enqueue(text, item.get("session", "default"), label)
-                log_problem("held mid-synthesis (%s); requeued a summary"
-                            % (hold_reason(cfg) or "unknown"))
+                # Held mid-synthesis. Put it back, unless this window produced a
+                # newer summary in the meantime -- then the newer one stands.
+                kept = requeue(item)
+                log_problem("held mid-synthesis (%s); %s"
+                            % (hold_reason(cfg) or "unknown",
+                               "requeued a summary" if kept
+                               else "dropped it, a newer one is already queued"))
                 return
             heard_labels.add(label)
     finally:
