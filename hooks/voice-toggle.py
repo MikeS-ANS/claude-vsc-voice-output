@@ -2,6 +2,8 @@
 """Turn spoken summaries on or off, and show current state.
 
   python voice-toggle.py            show what is on right now
+  python voice-toggle.py stop       CUT OFF speech playing right now, drop the queue
+  python voice-toggle.py pause      cut off what is playing, keep it for later
   python voice-toggle.py off        stop speaking (also stops Claude writing summaries)
   python voice-toggle.py on         start speaking again
   python voice-toggle.py quiet      speak only when you step away or a turn runs long
@@ -82,6 +84,21 @@ def main():
 
     if not args:
         status()
+        return 0
+
+    if args[0] in ("stop", "shutup", "quiet!"):
+        stopped, discarded = vl.stop_speaking(discard=True)
+        print("Stopped." if stopped else "Nothing was playing.")
+        if discarded:
+            print("Discarded %d queued summary(s) as well." % discarded)
+        return 0
+
+    if args[0] in ("pause", "hold", "later"):
+        stopped, _ = vl.stop_speaking(discard=False)
+        depth = vl.queue_depth()
+        print("Paused." if stopped else "Nothing was playing.")
+        print("%d summary(s) waiting -- they play on your next turn." % depth
+              if depth else "Nothing left queued.")
         return 0
 
     if args[0] in ("lock", "locked", "screen"):

@@ -29,6 +29,7 @@ def isolate(vl, keep=False):
     vl.LOCK_PATH = os.path.join(root, "speak.lock")
     vl.ERROR_LOG = os.path.join(root, "voice-errors.log")
     vl.SPOKEN_LOG = os.path.join(root, "voice-spoken.log")
+    vl.INFLIGHT_PATH = os.path.join(root, "inflight.json")
 
     os.makedirs(vl.QUEUE_DIR, exist_ok=True)
 

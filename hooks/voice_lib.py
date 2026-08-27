@@ -308,17 +308,50 @@ def _synth_kokoro(text_file, wav, voice, rate):
     return True
 
 
-def _play_wav(wav):
-    return run_powershell(_PLAY_WAV_PS, {"CV_WAV_FILE": wav})
+def _play_wav(wav, interrupt_check=None, poll=0.5):
+    """Play a WAV file.
+
+    Returns True if it played, False on failure, or a reason string if
+    interrupt_check said to stop partway. PlaySync blocks for the whole
+    utterance, so interrupting means killing the player -- which is the only way
+    to react to a call that starts mid-sentence.
+    """
+    if interrupt_check is None:
+        return run_powershell(_PLAY_WAV_PS, {"CV_WAV_FILE": wav})
+
+    env = dict(os.environ, CV_WAV_FILE=wav)
+    try:
+        proc = subprocess.Popen(
+            [powershell(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-Command", _PLAY_WAV_PS],
+            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=_CREATE_NO_WINDOW)
+    except Exception as exc:
+        log_problem("could not start playback: %r" % (exc,))
+        return False
+
+    while proc.poll() is None:
+        reason = interrupt_check()
+        if reason:
+            _kill_tree(proc.pid, image="powershell.exe")
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+            return reason
+        time.sleep(poll)
+    return proc.returncode == 0
 
 
-def speak(text, cfg=None, guard=None):
+def speak(text, cfg=None, guard=None, interrupt=None):
     """Speak text aloud.
 
     Engine order: Kokoro (local neural) -> WinRT -> SAPI. Each fallback is a
     downgrade in voice quality, never a drop to silence.
 
     guard, if given, is called after synthesis and immediately before playback.
+    interrupt, if given, is polled DURING playback; returning a reason cuts the
+    audio off and makes this return "interrupted".
     Returning False aborts playback and makes this return the string "deferred",
     so the caller can requeue instead of talking over the user. Synthesis takes
     several seconds, which is long enough for a call or dictation to start.
@@ -381,7 +414,11 @@ def speak(text, cfg=None, guard=None):
                     log_spoken("deferred", text)
                     return "deferred"
 
-                if _play_wav(wav):
+                played = _play_wav(wav, interrupt_check=interrupt)
+                if isinstance(played, str):
+                    log_spoken("cut off", "%s -- %s" % (played, text))
+                    return "interrupted"
+                if played:
                     if eng != order[0]:
                         log_problem("engine %r failed; fell back to %r" % (order[0], eng))
                     log_spoken("spoke", text)
@@ -949,10 +986,18 @@ def requeue(item):
 
 
 def become_speaker():
-    """Claim the sole draining role. False means someone else already has it."""
+    """Claim the sole draining role. False means someone else already has it.
+
+    Records this worker's PID so speech already in flight can be stopped: the
+    only way to cut a summary mid-sentence is to kill the player.
+    """
     state_dir()
     try:
-        os.close(os.open(SPEAKER_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        fd = os.open(SPEAKER_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            os.write(fd, str(os.getpid()).encode())
+        finally:
+            os.close(fd)
         return True
     except FileExistsError:
         try:
@@ -971,6 +1016,99 @@ def release_speaker():
         os.unlink(SPEAKER_LOCK)
     except OSError:
         pass
+
+
+INFLIGHT_PATH = os.path.join(STATE_DIR, "inflight.json")
+
+
+def set_inflight(item):
+    """Note which summary is playing, so it survives the worker being killed.
+
+    It has already been dequeued by this point, and the requeue-on-interrupt
+    path lives inside the worker -- which is exactly what gets killed. Without
+    this, stopping speech would silently discard the summary being spoken.
+    """
+    try:
+        with open(INFLIGHT_PATH, "w", encoding="utf-8") as f:
+            json.dump({k: v for k, v in item.items() if not k.startswith("_")}, f)
+    except OSError:
+        pass
+
+
+def clear_inflight():
+    try:
+        os.unlink(INFLIGHT_PATH)
+    except OSError:
+        pass
+
+
+def take_inflight():
+    """Return the interrupted summary, if any, and forget it."""
+    try:
+        with open(INFLIGHT_PATH, "r", encoding="utf-8") as f:
+            item = json.load(f)
+    except (OSError, ValueError):
+        return None
+    clear_inflight()
+    return item
+
+
+def speaking_pid():
+    """PID of the worker currently draining the queue, or None."""
+    try:
+        with open(SPEAKER_LOCK, "r", encoding="utf-8") as f:
+            return int((f.read() or "").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _kill_tree(pid, image="python.exe"):
+    """Kill a process and its children. Filtered by image name, because a PID
+    read from a file may have been recycled by an unrelated process."""
+    try:
+        r = subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F",
+             "/FI", "IMAGENAME eq %s" % image],
+            capture_output=True, text=True, timeout=20,
+            creationflags=_CREATE_NO_WINDOW)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def stop_speaking(discard=False):
+    """Cut off speech that is playing right now.
+
+    discard=False keeps whatever is queued, so it plays once the reason for
+    stopping has passed -- that is a pause. discard=True empties the queue too.
+    Returns (stopped_something, how_many_discarded).
+    """
+    pid = speaking_pid()
+    stopped = False
+    if pid and pid != os.getpid():
+        stopped = _kill_tree(pid)
+    # The worker cannot run its own cleanup once killed.
+    release_speaker()
+
+    discarded = 0
+    interrupted = take_inflight()
+
+    if discard:
+        for item in queue_items():
+            try:
+                os.unlink(item["_path"])
+                discarded += 1
+            except OSError:
+                pass
+        if interrupted:
+            discarded += 1
+    elif interrupted:
+        # A pause keeps it: requeued at its original time, so it holds its place.
+        requeue(interrupted)
+
+    log_problem("speech stopped by hand (pid=%s, discarded=%d, kept=%s)"
+                % (pid, discarded, bool(interrupted and not discard)))
+    return stopped, discarded
 
 
 def say_detached(text, session_id="default", cwd=""):
@@ -1067,7 +1205,19 @@ def drain_pending(cfg=None):
             # talking, so re-check both right before the audio plays.
             guard = lambda: hold_reason(cfg) is None
 
-            result = speak(announced, cfg, guard=guard)
+            # Polled while the audio plays: a call that starts mid-sentence cuts
+            # it off rather than being talked over for another ten seconds.
+            interrupt = (lambda: hold_reason(cfg)) if respect_mic else None
+
+            set_inflight(item)
+            result = speak(announced, cfg, guard=guard, interrupt=interrupt)
+            clear_inflight()
+
+            if result == "interrupted":
+                requeue(item)
+                log_problem("cut off mid-sentence (%s); requeued it whole"
+                            % (hold_reason(cfg) or "stopped"))
+                return
             if result == "deferred":
                 # Held mid-synthesis. Put it back, unless this window produced a
                 # newer summary in the meantime -- then the newer one stands.

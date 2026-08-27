@@ -21,6 +21,8 @@ cd $env:USERPROFILE\.claude\hooks
 | I want to... | Command |
 | --- | --- |
 | See what's currently on | `python voice-toggle.py` |
+| **Shut it up right now** | `python voice-toggle.py stop` |
+| **Cut it off, hear it later** | `python voice-toggle.py pause` |
 | **Turn speech off** | `python voice-toggle.py off` |
 | **Turn speech back on** | `python voice-toggle.py on` |
 | Speak only when I step away | `python voice-toggle.py quiet` |
@@ -220,6 +222,35 @@ one window is live, and `announce_session` can force it `always` or `never`.
 > The meeting problem is not something you notice until someone reviews it with fresh
 > eyes — credit to Jamison West, who also found that an app can hold the microphone for
 > weeks, which turns this gate from a courtesy into a permanent mute.
+
+---
+
+## Stopping speech that is already playing
+
+`voice-toggle.py off` only affects future turns. To cut off something mid-sentence — the
+phone rings while a backlog is playing — there are two commands:
+
+```powershell
+python voice-toggle.py stop      # silence now, and throw away what is queued
+python voice-toggle.py pause     # silence now, keep the queue for later
+```
+
+**`pause` loses nothing.** The summary being spoken has already been taken off the queue,
+and the code that would put it back lives in the worker that is being killed — so the
+worker records what it is playing, and `pause` puts that record back at its original
+position. You hear it from the start on your next turn.
+
+`stop` is the same thing plus emptying the queue, for when you do not want any of it.
+
+### It also cuts itself off
+
+The microphone is polled *during* playback, not only before it. If a call starts
+mid-sentence the audio is killed within about half a second and that summary goes back on
+the queue whole — you hear it after the call rather than being talked over. Same for
+locking the screen mid-sentence.
+
+This is the one case the between-utterances check cannot catch, and it is why playback runs
+as a polled subprocess rather than one blocking call.
 
 ---
 

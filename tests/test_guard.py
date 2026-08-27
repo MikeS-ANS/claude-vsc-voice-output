@@ -30,7 +30,8 @@ CFG = {"respect_microphone": True, "max_defer_seconds": 10, "max_stale_seconds":
 
 played = []
 real_play = vl._play_wav
-vl._play_wav = lambda wav: (played.append(wav) or True)
+# **kw so adding a parameter to _play_wav cannot silently break the suite
+vl._play_wav = lambda wav, **kw: (played.append(wav) or True)
 
 # The mic is mocked at microphone_users: the ONE seam that both the queue gate
 # (mic_busy -> microphone_in_use) and the pre-playback guard (hold_reason ->

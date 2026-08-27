@@ -21,7 +21,8 @@ from _isolate import isolate
 isolate(vl)                         # private state dir; no cross-suite leakage
 
 spoken = []
-vl.speak = lambda text, cfg=None, guard=None: spoken.append(text)
+# **kw so adding a parameter to speak() cannot silently break the suite
+vl.speak = lambda text, cfg=None, **kw: spoken.append(text)
 vl.microphone_in_use = lambda cfg=None: False
 vl.microphone_blockers = lambda cfg=None: []
 
@@ -101,7 +102,7 @@ played = []
 real_speak = vl.speak
 
 
-def speak_with_guard(text, cfg=None, guard=None):
+def speak_with_guard(text, cfg=None, guard=None, **kw):
     if guard is not None and not guard():
         return "deferred"
     played.append(text)

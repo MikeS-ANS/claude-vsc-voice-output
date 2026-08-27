@@ -26,7 +26,8 @@ isolate(vl)                         # private state dir; no cross-suite leakage
 vl.workstation_locked = lambda: False
 
 spoken = []
-vl.speak = lambda text, cfg=None, guard=None: spoken.append(text)
+# **kw so adding a parameter to speak() cannot silently break the suite
+vl.speak = lambda text, cfg=None, **kw: spoken.append(text)
 
 on_call = {"v": True}
 vl.microphone_users = lambda: ["Cytracom Desktop.exe"] if on_call["v"] else []

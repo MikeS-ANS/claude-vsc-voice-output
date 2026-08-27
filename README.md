@@ -42,6 +42,7 @@ there is one.
 | **After every turn** | Speaks a 2–4 sentence summary in a local neural voice |
 | **When Claude needs you** | Chime + a Windows toast that waits until you dismiss it |
 | **While you're on a call** | Silent. Holds the summary and speaks it when you hang up |
+| **If a call starts mid-sentence** | Cuts the audio off and requeues that summary whole |
 | **While your screen is locked** | Silent. Holds it until you unlock |
 | **When you've walked away** | Pushes a one-line version to your phone instead |
 | **With several windows open** | Every summary is named by its project and played in order |
@@ -84,7 +85,9 @@ python install.py --uninstall   # remove the hooks
 cd $env:USERPROFILE\.claude\hooks
 
 python voice-toggle.py                  # what's on, what's queued, what's blocking it
-python voice-toggle.py off              # silence
+python voice-toggle.py stop             # cut off speech playing right now
+python voice-toggle.py pause            # cut it off but keep it for later
+python voice-toggle.py off              # silence future turns
 python voice-toggle.py on               # back on
 python voice-voices.py --audition       # hear the shortlist, then pick
 python voice-voices.py --set am_puck    # 54 voices, 28 of them English
