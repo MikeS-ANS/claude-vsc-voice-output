@@ -286,16 +286,24 @@ holder.kill()
 holder.wait()
 clear_audio_lock()
 
-# stop_speaking must release the audio lock it just orphaned
+# stop_speaking must release a lock whose owner is gone -- but only then.
+# An earlier version released it unconditionally, which is how a survivor that
+# had not actually been killed ended up talking under a freshly started worker.
 reset()
+gone = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+gone.kill()
+gone.wait()
+time.sleep(0.3)
 with open(AUDIO_LOCK, "w", encoding="utf-8") as f:
-    f.write(str(os.getpid()))
-vl.set_inflight({"text": "x", "session": "A", "label": "L", "created": time.time()})
+    f.write(str(gone.pid))                 # owner is dead
 with open(vl.SPEAKER_LOCK, "w", encoding="utf-8") as f:
-    f.write(str(os.getpid() + 1))          # a pid that is not us and not alive
+    f.write(str(gone.pid))
+vl.set_inflight({"text": "x", "session": "A", "label": "L", "created": time.time()})
 vl.stop_speaking(discard=True)
-checks.append(("stopping speech clears the audio lock too",
+checks.append(("a lock left by a dead worker is released",
                not os.path.exists(AUDIO_LOCK)))
+checks.append(("...and so is its speaker lock",
+               not os.path.exists(vl.SPEAKER_LOCK)))
 clear_audio_lock()
 
 # release_lock must delete the file acquire_lock created. These built the path
@@ -308,6 +316,87 @@ checks.append(("acquire_lock takes the lock", got is True and os.path.exists(AUD
 vl.release_lock()
 checks.append(("release_lock actually releases it", not os.path.exists(AUDIO_LOCK)))
 checks.append(("...so it can be taken again straight away",
+               vl.acquire_lock(timeout=2) is True))
+vl.release_lock()
+clear_audio_lock()
+
+# --- a worker launched as pythonw must still be killable -----------------
+# The hotkey runs pythonw.exe, so workers it spawns inherit that. The kill used
+# taskkill's IMAGENAME filter with a single name, so it silently failed on those
+# while the caller believed speech had stopped -- the survivor kept talking, the
+# locks were released anyway, and the next worker started over the top of it.
+PYW = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+
+if os.path.isfile(PYW):
+    reset()
+    worker = subprocess.Popen([PYW, "-c", "import time; time.sleep(60)"])
+    time.sleep(0.7)
+    checks.append(("a pythonw worker is recognised",
+                   vl.process_image(worker.pid) == "pythonw.exe"))
+    checks.append(("a pythonw worker is killed", vl._kill_tree(worker.pid) is True))
+    checks.append(("...and is genuinely gone", not vl.pid_alive(worker.pid)))
+    try:
+        worker.kill()
+    except Exception:
+        pass
+
+reset()
+plain = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+time.sleep(0.6)
+checks.append(("a python worker is killed too", vl._kill_tree(plain.pid) is True))
+try:
+    plain.kill()
+except Exception:
+    pass
+
+# and a recycled PID belonging to something else is left alone
+reset()
+foreign = subprocess.Popen(["notepad.exe"])
+time.sleep(0.8)
+checks.append(("a process that is not ours is refused",
+               vl._kill_tree(foreign.pid) is False))
+checks.append(("...and survives", vl.pid_alive(foreign.pid)))
+foreign.kill()
+foreign.wait()
+
+# --- locks must not be released while their owner is still speaking ------
+reset()
+clear_audio_lock()
+survivor = subprocess.Popen(["notepad.exe"])          # unkillable by us, stands in
+time.sleep(0.8)
+with open(vl.SPEAKER_LOCK, "w", encoding="utf-8") as f:
+    f.write(str(survivor.pid))
+with open(AUDIO_LOCK, "w", encoding="utf-8") as f:
+    f.write(str(survivor.pid))
+
+vl.stop_speaking(discard=False)
+checks.append(("a live un-killed worker keeps its speaker lock",
+               os.path.exists(vl.SPEAKER_LOCK)))
+checks.append(("...and keeps the audio lock, so nothing talks over it",
+               os.path.exists(AUDIO_LOCK)))
+survivor.kill()
+survivor.wait()
+try:
+    os.unlink(vl.SPEAKER_LOCK)
+except OSError:
+    pass
+clear_audio_lock()
+
+# --- a long utterance must not have its lock stolen ---------------------
+reset()
+clear_audio_lock()
+holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+time.sleep(0.5)
+with open(AUDIO_LOCK, "w", encoding="utf-8") as f:
+    f.write(str(holder.pid))
+old_mtime = time.time() - 600                          # pretend it is 10 min old
+os.utime(AUDIO_LOCK, (old_mtime, old_mtime))
+checks.append(("a live owner is never stolen from, however old the lock",
+               vl.acquire_lock(timeout=1) is False))
+holder.kill()
+holder.wait()
+time.sleep(0.3)
+checks.append(("...but once that owner dies the lock is free",
                vl.acquire_lock(timeout=2) is True))
 vl.release_lock()
 clear_audio_lock()

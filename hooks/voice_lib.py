@@ -190,8 +190,13 @@ def acquire_lock(timeout=30, stale_after=60):
             except OSError:
                 continue
 
-            if (owner and not pid_alive(owner)) or age > stale_after:
-                log_problem("audio lock held by a dead process (pid=%s, %.0fs); taking it"
+            # A live owner is never stolen from, however long it has held the
+            # device: a long summary is not a stuck one, and taking the lock off
+            # a process that is still speaking plays two summaries at once.
+            # Age only decides it when there is no owner to ask about.
+            takeable = (not pid_alive(owner)) if owner else (age > stale_after)
+            if takeable:
+                log_problem("audio lock is free (owner=%s, %.0fs old); taking it"
                             % (owner, age))
                 try:
                     os.unlink(path)
@@ -204,6 +209,15 @@ def acquire_lock(timeout=30, stale_after=60):
             time.sleep(0.1)
         except Exception:
             return False
+
+
+def audio_lock_owner():
+    """PID recorded in the audio lock, or None."""
+    try:
+        with open(audio_lock_path(), "r", encoding="utf-8") as f:
+            return int((f.read() or "").strip())
+    except (OSError, ValueError):
+        return None
 
 
 def release_lock():
@@ -476,6 +490,7 @@ def speak(text, cfg=None, guard=None, interrupt=None):
                     log_spoken("deferred", text)
                     return "deferred"
 
+                log_spoken("start", "pid=%d %s" % (os.getpid(), text))
                 played = _play_wav(wav, interrupt_check=interrupt)
                 if isinstance(played, str):
                     log_spoken("cut off", "%s -- %s" % (played, text))
@@ -705,6 +720,36 @@ def _process_running(exe_name):
         return False
     finally:
         k32.CloseHandle(snap)
+
+
+def process_image(pid):
+    """Executable name for a PID, lowercased, or None.
+
+    Used instead of taskkill's IMAGENAME filter. That filter takes one name, and
+    a worker is python.exe or pythonw.exe depending on what launched it -- the
+    hotkey runs pythonw, so filtering on python.exe made the kill fail silently
+    while the caller believed it had stopped the speech.
+    """
+    if not pid:
+        return None
+    try:
+        k32 = ctypes.windll.kernel32
+        snap = k32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+        if snap == -1:
+            return None
+        try:
+            entry = _PROCESSENTRY32()
+            entry.dwSize = ctypes.sizeof(_PROCESSENTRY32)
+            ok = k32.Process32First(snap, ctypes.byref(entry))
+            while ok:
+                if entry.th32ProcessID == int(pid):
+                    return entry.szExeFile.decode(errors="replace").lower()
+                ok = k32.Process32Next(snap, ctypes.byref(entry))
+        finally:
+            k32.CloseHandle(snap)
+    except Exception:
+        return None
+    return None
 
 
 def workstation_locked():
@@ -1243,18 +1288,41 @@ def speaking_pid():
         return None
 
 
-def _kill_tree(pid, image="python.exe"):
-    """Kill a process and its children. Filtered by image name, because a PID
-    read from a file may have been recycled by an unrelated process."""
-    try:
-        r = subprocess.run(
-            ["taskkill", "/PID", str(pid), "/T", "/F",
-             "/FI", "IMAGENAME eq %s" % image],
-            capture_output=True, text=True, timeout=20,
-            creationflags=_CREATE_NO_WINDOW)
-        return r.returncode == 0
-    except Exception:
+_KILLABLE_IMAGES = ("python.exe", "pythonw.exe", "powershell.exe")
+
+
+def _kill_tree(pid, images=_KILLABLE_IMAGES):
+    """Kill a process and its children. True only if it is actually gone.
+
+    Checks the image name here rather than handing taskkill a single-name filter,
+    so a worker launched as pythonw is killed too, and so a recycled PID
+    belonging to something unrelated is left alone.
+    """
+    if not pid:
         return False
+    if not pid_alive(pid):
+        return True                          # already gone; nothing to do
+
+    image = process_image(pid)
+    if image is not None and image not in images:
+        log_problem("refusing to kill pid %s: it is %s, not one of ours"
+                    % (pid, image))
+        return False
+
+    try:
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                       capture_output=True, text=True, timeout=20,
+                       creationflags=_CREATE_NO_WINDOW)
+    except Exception as exc:
+        log_problem("taskkill failed on pid %s: %r" % (pid, exc))
+        return False
+
+    for _ in range(20):                      # confirm, do not assume
+        if not pid_alive(pid):
+            return True
+        time.sleep(0.05)
+    log_problem("pid %s survived the kill" % pid)
+    return False
 
 
 def stop_speaking(discard=False, hold=False):
@@ -1270,12 +1338,19 @@ def stop_speaking(discard=False, hold=False):
     stopped = False
     if pid and pid != os.getpid():
         stopped = _kill_tree(pid)
-    # The worker cannot run its own cleanup once killed, so release what it held.
-    # Unconditionally: a worker that already crashed leaves the same orphaned
-    # audio lock, and that case reports stopped=False because there was nothing
-    # left to kill. Stopping speech means nobody should be holding the device.
-    release_speaker()
-    release_lock()
+
+    # Release only what nobody is still holding. Releasing a lock while its
+    # owner is alive and talking is how two summaries ended up playing at once:
+    # the survivor kept speaking with no lock held, so the next worker started
+    # straight over the top of it.
+    if pid is None or stopped or not pid_alive(pid):
+        release_speaker()
+    else:
+        log_problem("worker %s is still alive; leaving its locks alone" % pid)
+
+    owner = audio_lock_owner()
+    if owner is None or not pid_alive(owner) or owner == pid and stopped:
+        release_lock()
 
     discarded = 0
     interrupted = take_inflight()
