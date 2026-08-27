@@ -67,3 +67,26 @@ def set_config(vl, **values):
     with open(vl.CONFIG_PATH, "w", encoding="utf-8", newline="\n") as f:
         json.dump(cfg, f, indent=2)
     return cfg
+
+def stub_synthesis(vl, on_synth=None):
+    """Make synthesis instant and audio-free.
+
+    Centralised deliberately: suites used to patch voice_lib internals directly,
+    so every change to how synthesis works broke several of them at once -- and a
+    broken suite reports zero assertions, which reads as "nothing ran" rather
+    than "something failed".
+    """
+    def _start(engine, text, wav, cfg):
+        if on_synth is not None:
+            on_synth(text)
+        try:
+            with open(wav, "wb") as f:
+                f.write(b"x")
+        except OSError:
+            return None
+        return {"kind": "stub", "wav": wav, "ok": True}
+
+    vl._synth_start = _start
+    vl._synth_finish = lambda handle, timeout=300: bool(handle)
+    vl._synth_server_start = lambda: None
+    vl.synth_server_stop = lambda: None

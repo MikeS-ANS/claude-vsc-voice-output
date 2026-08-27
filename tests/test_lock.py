@@ -16,9 +16,10 @@ HOOKS = os.environ.get(
 sys.path.insert(0, HOOKS)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import voice_lib as vl
-from _isolate import isolate
+from _isolate import isolate, stub_synthesis
 
-isolate(vl)                         # private state dir; no cross-suite leakage
+isolate(vl)          # private state dir; no cross-suite leakage
+stub_synthesis(vl)   # instant, silent synthesis
 
 spoken = []
 # **kw so adding a parameter to speak() cannot silently break the suite

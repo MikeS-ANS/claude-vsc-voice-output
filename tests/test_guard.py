@@ -16,9 +16,10 @@ HOOKS = os.environ.get(
 sys.path.insert(0, HOOKS)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import voice_lib as vl
-from _isolate import isolate
+from _isolate import isolate, stub_synthesis
 
-isolate(vl)                         # private state dir; no cross-suite leakage
+isolate(vl)          # private state dir; no cross-suite leakage
+stub_synthesis(vl)   # instant, silent synthesis
 
 # These suites test queue/mic logic, not lock handling, and may run on a
 # locked machine -- pin the lock signal off.
@@ -45,7 +46,7 @@ vl.microphone_users = lambda: ["Teams.exe"] if mic["busy"] else []
 synths = {"n": 0}
 
 
-def synth(txt, wav, voice, rate):
+def synth(engine, text, wav, cfg):
     """Pretend synthesis succeeded instantly, so no real audio is needed.
 
     When armed, the mic goes busy DURING synthesis -- the reported bug. A
@@ -58,10 +59,10 @@ def synth(txt, wav, voice, rate):
         f.write(b"x")
     if mic["arm"]:
         mic["busy"] = True
-    return True
+    return {"kind": "stub", "wav": wav, "ok": True}
 
 
-vl._synth_kokoro = synth
+vl._synth_start = synth
 
 
 def reset(live=("A",), busy=False, arm=False):
@@ -135,19 +136,19 @@ reset(arm=True)
 vl.enqueue("the stale one that was already rendering", "A", "Anchor Hub")
 
 
-def synth_then_newer(txt, wav, voice, rate):
+def synth_then_newer(engine, text, wav, cfg):
     """Synthesise, and have that window finish another turn while we do."""
     synths["n"] += 1
     mic["busy"] = True                      # forces the guard to defer
     vl.enqueue("the newer one that landed meanwhile", "A", "Anchor Hub")
     open(wav, "wb").write(b"x")
-    return True
+    return {"kind": "stub", "wav": wav, "ok": True}
 
 
-real_synth = vl._synth_kokoro
-vl._synth_kokoro = synth_then_newer
+real_synth = vl._synth_start
+vl._synth_start = synth_then_newer
 vl.drain_pending(CFG)
-vl._synth_kokoro = real_synth
+vl._synth_start = real_synth
 
 queued = [(i.get("text") or "") for i in vl.queue_items()]
 checks.append(("deferred while a newer summary arrived: nothing played", played == []))
