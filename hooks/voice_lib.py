@@ -792,6 +792,8 @@ def probably_away(cfg=None):
 def hold_reason(cfg=None):
     """Why speech should not play right now, or None if it may."""
     cfg = cfg or load_config()
+    if is_paused():
+        return "speech is paused"
     if locked_now(cfg):
         return "the screen is locked"
     blockers = microphone_blockers(cfg) if cfg.get("respect_microphone", True) else []
@@ -1053,6 +1055,41 @@ def take_inflight():
     return item
 
 
+PAUSE_PATH = os.path.join(STATE_DIR, "paused")
+
+
+def is_paused():
+    return os.path.exists(PAUSE_PATH)
+
+
+def set_paused():
+    """Hold all speech until resumed. The queue keeps filling meanwhile."""
+    state_dir()
+    try:
+        with open(PAUSE_PATH, "w", encoding="utf-8") as f:
+            f.write(str(time.time()))
+        return True
+    except OSError:
+        return False
+
+
+def clear_paused():
+    try:
+        os.unlink(PAUSE_PATH)
+        return True
+    except OSError:
+        return False
+
+
+def paused_since():
+    """Seconds since speech was paused, or None."""
+    try:
+        with open(PAUSE_PATH, "r", encoding="utf-8") as f:
+            return max(0.0, time.time() - float(f.read().strip()))
+    except (OSError, ValueError):
+        return None
+
+
 def speaking_pid():
     """PID of the worker currently draining the queue, or None."""
     try:
@@ -1076,11 +1113,13 @@ def _kill_tree(pid, image="python.exe"):
         return False
 
 
-def stop_speaking(discard=False):
+def stop_speaking(discard=False, hold=False):
     """Cut off speech that is playing right now.
 
-    discard=False keeps whatever is queued, so it plays once the reason for
-    stopping has passed -- that is a pause. discard=True empties the queue too.
+    discard=False keeps whatever is queued; discard=True empties it as well.
+    hold=True additionally stops anything new from being spoken until resumed,
+    which is what makes a pause hold through following turns rather than being
+    undone by the next one.
     Returns (stopped_something, how_many_discarded).
     """
     pid = speaking_pid()
@@ -1106,9 +1145,36 @@ def stop_speaking(discard=False):
         # A pause keeps it: requeued at its original time, so it holds its place.
         requeue(interrupted)
 
-    log_problem("speech stopped by hand (pid=%s, discarded=%d, kept=%s)"
-                % (pid, discarded, bool(interrupted and not discard)))
+    if hold:
+        set_paused()
+    else:
+        clear_paused()
+
+    log_problem("speech stopped by hand (pid=%s, discarded=%d, kept=%s, held=%s)"
+                % (pid, discarded, bool(interrupted and not discard), bool(hold)))
     return stopped, discarded
+
+
+def resume_speaking():
+    """Lift a pause and start speaking whatever is waiting, now.
+
+    Without kicking off a worker the backlog would sit until the next turn,
+    which is not what pressing resume means.
+    """
+    clear_paused()
+    depth = queue_depth()
+    if depth:
+        flags = 0x00000008 | _CREATE_NO_WINDOW
+        try:
+            subprocess.Popen(
+                [sys.executable, os.path.join(HOOKS_DIR, "voice-say.py"), "--drain"],
+                creationflags=flags, close_fds=True,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            log_problem("resume could not start a worker: %r" % (exc,))
+    return depth
 
 
 def say_detached(text, session_id="default", cwd=""):
@@ -1163,6 +1229,12 @@ def drain_pending(cfg=None):
             if not queue_depth():
                 return
 
+            # A deliberate pause holds until resumed, however many turns pass.
+            if is_paused():
+                log_problem("speech is paused; %d summary(s) waiting"
+                            % queue_depth())
+                return
+
             # A locked screen can last hours, so do not sit here waiting on it --
             # leave the queue alone and let a later turn pick it up. A call, by
             # contrast, is minutes, so that one is worth waiting out.
@@ -1207,7 +1279,7 @@ def drain_pending(cfg=None):
 
             # Polled while the audio plays: a call that starts mid-sentence cuts
             # it off rather than being talked over for another ten seconds.
-            interrupt = (lambda: hold_reason(cfg)) if respect_mic else None
+            interrupt = lambda: hold_reason(cfg)
 
             set_inflight(item)
             result = speak(announced, cfg, guard=guard, interrupt=interrupt)

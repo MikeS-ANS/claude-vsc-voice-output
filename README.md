@@ -43,6 +43,7 @@ there is one.
 | **When Claude needs you** | Chime + a Windows toast that waits until you dismiss it |
 | **While you're on a call** | Silent. Holds the summary and speaks it when you hang up |
 | **If a call starts mid-sentence** | Cuts the audio off and requeues that summary whole |
+| **A desk phone or mobile rings** | `Ctrl+Alt+P` pauses; press again to resume |
 | **While your screen is locked** | Silent. Holds it until you unlock |
 | **When you've walked away** | Pushes a one-line version to your phone instead |
 | **With several windows open** | Every summary is named by its project and played in order |
@@ -65,8 +66,9 @@ python install.py
 ```
 
 That copies the hooks into `%USERPROFILE%\.claude\hooks`, builds a virtual environment,
-downloads the Kokoro voice model (~354 MB, one time), registers a toast identity, and wires
-three hooks into your `settings.json`. It leaves any other hooks you have alone, and never
+downloads the Kokoro voice model (~354 MB, one time), registers a toast identity, adds a
+`Ctrl+Alt+P` shortcut to pause and resume speech, and wires three hooks into your
+`settings.json`. It leaves any other hooks you have alone, and never
 overwrites an existing `voice-config.json`.
 
 Then **start a new Claude Code session** — hook registration is read at startup.
@@ -86,7 +88,7 @@ cd $env:USERPROFILE\.claude\hooks
 
 python voice-toggle.py                  # what's on, what's queued, what's blocking it
 python voice-toggle.py stop             # cut off speech playing right now
-python voice-toggle.py pause            # cut it off but keep it for later
+python voice-toggle.py pause            # pause; run again to resume (or Ctrl+Alt+P)
 python voice-toggle.py off              # silence future turns
 python voice-toggle.py on               # back on
 python voice-voices.py --audition       # hear the shortlist, then pick

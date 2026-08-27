@@ -131,6 +131,65 @@ result = vl.speak("let me finish", {"engine": "kokoro", "rate": 1.0},
 checks.append(("an uninterrupted playback still returns True", result is True))
 vl._play_wav = real_play
 
+# --- pause HOLDS through later turns, resume lifts it ---------------------
+reset()
+vl.clear_paused()
+checks.append(("not paused to begin with", not vl.is_paused()))
+
+vl.enqueue("held while paused", "A", "My Project")
+vl.stop_speaking(discard=False, hold=True)
+checks.append(("pause sets the hold", vl.is_paused()))
+checks.append(("pause keeps the queue", vl.queue_depth() == 1))
+checks.append(("hold_reason says so", vl.hold_reason({}) == "speech is paused"))
+
+# A later turn must NOT quietly undo the pause.
+spoke = []
+real_speak = vl.speak
+vl.speak = lambda text, cfg=None, **kw: spoke.append(text)
+vl.drain_pending({"respect_microphone": False, "respect_lock": False,
+                  "max_stale_seconds": 0})
+checks.append(("a later turn does not break the pause", spoke == []))
+checks.append(("...and the summary is still waiting", vl.queue_depth() == 1))
+
+# Resume speaks what was waiting.
+depth = vl.resume_speaking()
+checks.append(("resume reports what was waiting", depth == 1))
+checks.append(("resume clears the hold", not vl.is_paused()))
+vl.drain_pending({"respect_microphone": False, "respect_lock": False,
+                  "max_stale_seconds": 0})
+checks.append(("after resume it is spoken",
+               len(spoke) == 1 and "held while paused" in spoke[0]))
+vl.speak = real_speak
+
+# --- stop must not leave a lingering hold --------------------------------
+reset()
+vl.set_paused()
+vl.stop_speaking(discard=True, hold=False)
+checks.append(("stop clears any hold", not vl.is_paused()))
+
+# --- paused_since reports roughly how long ------------------------------
+reset()
+vl.clear_paused()
+checks.append(("paused_since is None when running", vl.paused_since() is None))
+vl.set_paused()
+held = vl.paused_since()
+checks.append(("paused_since is a small number just after pausing",
+               held is not None and held < 5))
+vl.clear_paused()
+
+# --- a pause cuts off audio already playing -----------------------------
+reset()
+vl.set_paused()
+real_play2 = vl._play_wav
+vl._play_wav = lambda wav, interrupt_check=None, poll=0.5, **kw: (
+    interrupt_check() if interrupt_check else True)
+vl._synth_kokoro = lambda txt, wav, voice, rate: (open(wav, "wb").write(b"x") or True)
+result = vl.speak("stop me", {"engine": "kokoro", "rate": 1.0},
+                  guard=lambda: True, interrupt=lambda: vl.hold_reason({}))
+checks.append(("pausing mid-sentence interrupts playback", result == "interrupted"))
+vl._play_wav = real_play2
+vl.clear_paused()
+
 reset()
 print()
 ok = True

@@ -3,7 +3,7 @@
 
   python voice-toggle.py            show what is on right now
   python voice-toggle.py stop       CUT OFF speech playing right now, drop the queue
-  python voice-toggle.py pause      cut off what is playing, keep it for later
+  python voice-toggle.py pause      pause speech; run again to resume (hotkey-friendly)
   python voice-toggle.py off        stop speaking (also stops Claude writing summaries)
   python voice-toggle.py on         start speaking again
   python voice-toggle.py quiet      speak only when you step away or a turn runs long
@@ -22,6 +22,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import voice_lib as vl
 
 
+def _notify(title, body):
+    """A hotkey has no console, so confirm visually."""
+    try:
+        if vl.load_config().get("toast", True):
+            vl.toast(title, body)
+    except Exception:
+        pass
+
+
 def save(**changes):
     cfg = json.load(io.open(vl.CONFIG_PATH, encoding="utf-8"))
     cfg.update(changes)
@@ -35,7 +44,12 @@ def status():
     speak = cfg.get("speak", True)
     always = cfg.get("always_speak", True)
 
-    print("Speech      : %s" % ("ON" if speak else "OFF"))
+    if vl.is_paused():
+        held = vl.paused_since() or 0
+        print("Speech      : PAUSED %.0f min ago -- run 'pause' again to resume"
+              % (held / 60.0))
+    else:
+        print("Speech      : %s" % ("ON" if speak else "OFF"))
     if speak:
         print("When        : %s" % ("every turn" if always else
                                     "only when you step away (%ss) or a turn runs long (%ss)"
@@ -87,18 +101,28 @@ def main():
         return 0
 
     if args[0] in ("stop", "shutup", "quiet!"):
-        stopped, discarded = vl.stop_speaking(discard=True)
+        stopped, discarded = vl.stop_speaking(discard=True, hold=False)
         print("Stopped." if stopped else "Nothing was playing.")
         if discarded:
             print("Discarded %d queued summary(s) as well." % discarded)
         return 0
 
-    if args[0] in ("pause", "hold", "later"):
-        stopped, _ = vl.stop_speaking(discard=False)
-        depth = vl.queue_depth()
-        print("Paused." if stopped else "Nothing was playing.")
-        print("%d summary(s) waiting -- they play on your next turn." % depth
-              if depth else "Nothing left queued.")
+    if args[0] in ("pause", "hold", "resume", "toggle"):
+        # One command, both directions, so a single hotkey can do the job.
+        if vl.is_paused():
+            depth = vl.resume_speaking()
+            print("Resumed." + (" Speaking %d waiting summary(s)." % depth
+                                if depth else " Nothing was waiting."))
+            _notify("Claude voice resumed",
+                    "Speaking %d waiting summary(s)." % depth if depth
+                    else "Nothing was waiting.")
+        else:
+            stopped, _ = vl.stop_speaking(discard=False, hold=True)
+            depth = vl.queue_depth()
+            print("Paused%s. %d summary(s) held -- press again to resume."
+                  % (" mid-sentence" if stopped else "", depth))
+            _notify("Claude voice paused",
+                    "%d summary(s) held. Press the shortcut again to resume." % depth)
         return 0
 
     if args[0] in ("lock", "locked", "screen"):

@@ -5,6 +5,8 @@
     python install.py --dry-run       show what would change, touch nothing
     python install.py --no-model      skip the ~354MB Kokoro download
     python install.py --uninstall     remove the hooks (leaves files in place)
+    python install.py --hotkey "CTRL+ALT+M"   use a different pause shortcut
+    python install.py --no-hotkey     skip the shortcut entirely
 
 What it does:
   1. copies the hook scripts into %USERPROFILE%\\.claude\\hooks
@@ -14,8 +16,9 @@ What it does:
   5. registers a toast identity so notifications say "Claude VSC Notice"
   6. checks for apps that hold the microphone permanently, which would
      otherwise silence speech for good, and offers to ignore them
-  7. registers three hooks in %USERPROFILE%\\.claude\\settings.json
-  8. speaks a line so you know it works
+  7. creates a Start Menu shortcut with a global hotkey to pause/resume speech
+  8. registers three hooks in %USERPROFILE%\\.claude\\settings.json
+  9. speaks a line so you know it works
 
 It never overwrites an existing voice-config.json, and it leaves any hooks it
 did not create alone.
@@ -231,6 +234,74 @@ def check_microphone():
     say(" microphone_ignore", "now %s" % cfg["microphone_ignore"])
 
 
+DEFAULT_HOTKEY = "CTRL+ALT+P"
+START_MENU = os.path.join(HOME, "AppData", "Roaming", "Microsoft", "Windows",
+                          "Start Menu", "Programs", "Claude Voice")
+SHORTCUT_NAME = "Pause Claude Voice.lnk"
+
+_SHORTCUT_PS = """
+$ErrorActionPreference = 'Stop'
+$shell = New-Object -ComObject WScript.Shell
+$link = $shell.CreateShortcut($env:CV_LNK)
+$link.TargetPath = $env:CV_TARGET
+$link.Arguments = $env:CV_ARGS
+$link.WorkingDirectory = $env:CV_WORKDIR
+$link.Description = 'Pause or resume Claude Code spoken summaries'
+$link.HotKey = $env:CV_HOTKEY
+$link.WindowStyle = 7
+$link.Save()
+"""
+
+
+def _windowless_python():
+    """pythonw.exe if present, so the hotkey never flashes a console."""
+    candidate = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    return candidate if os.path.isfile(candidate) else sys.executable
+
+
+def make_hotkey(hotkey=DEFAULT_HOTKEY):
+    """Create a Start Menu shortcut carrying a global keyboard shortcut.
+
+    Windows only honours a shortcut's HotKey when the .lnk lives in the Start
+    Menu or on the Desktop, so it goes in the Start Menu rather than a folder of
+    our choosing. Pressing it runs `voice-toggle.py pause`, which pauses or
+    resumes depending on the current state -- one key for both directions,
+    because when a call comes in you should not have to remember which.
+    """
+    if not act("create a %s shortcut to pause/resume speech" % hotkey):
+        return
+    try:
+        os.makedirs(START_MENU, exist_ok=True)
+        lnk = os.path.join(START_MENU, SHORTCUT_NAME)
+        ok = run_powershell(_SHORTCUT_PS, {
+            "CV_LNK": lnk,
+            "CV_TARGET": _windowless_python(),
+            "CV_ARGS": '"%s" pause' % os.path.join(DEST, "voice-toggle.py"),
+            "CV_WORKDIR": DEST,
+            "CV_HOTKEY": hotkey,
+        })
+    except Exception as exc:
+        say(" hotkey", "failed (%s)" % exc.__class__.__name__)
+        return
+    if ok and os.path.isfile(lnk):
+        say(" hotkey", "%s pauses or resumes speech" % hotkey)
+    else:
+        say(" hotkey", "could not be created; use voice-toggle.py pause instead")
+
+
+def remove_hotkey():
+    lnk = os.path.join(START_MENU, SHORTCUT_NAME)
+    if not os.path.isfile(lnk):
+        return
+    if act("remove the pause shortcut"):
+        try:
+            os.unlink(lnk)
+            os.rmdir(START_MENU)
+        except OSError:
+            pass
+        say(" hotkey", "removed")
+
+
 def register_toast():
     script = os.path.join(DEST, "voice-setup-toast.py")
     if not os.path.isfile(script):
@@ -238,6 +309,23 @@ def register_toast():
     if act("register the 'Claude VSC Notice' toast identity (HKCU, no admin)"):
         r = subprocess.run([sys.executable, script], capture_output=True, text=True)
         say(" toast identity", "registered" if r.returncode == 0 else "FAILED")
+
+
+def run_powershell(script, env_extra=None, timeout=60):
+    """Run a fixed PowerShell script; data goes through the environment."""
+    root = os.environ.get("SystemRoot", r"C:\Windows")
+    exe = os.path.join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    env = dict(os.environ)
+    env.update({k: ("" if v is None else str(v)) for k, v in (env_extra or {}).items()})
+    try:
+        return subprocess.run(
+            [exe if os.path.isfile(exe) else "powershell",
+             "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-Command", script],
+            env=env, timeout=timeout, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, creationflags=0x08000000).returncode == 0
+    except Exception:
+        return False
 
 
 def hook_entry(script, synchronous, timeout, matcher):
@@ -306,6 +394,9 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-model", action="store_true")
     ap.add_argument("--uninstall", action="store_true")
+    ap.add_argument("--hotkey", default=DEFAULT_HOTKEY,
+                    help="global shortcut for pause/resume (default %s)" % DEFAULT_HOTKEY)
+    ap.add_argument("--no-hotkey", action="store_true")
     args = ap.parse_args()
     DRY = args.dry_run
 
@@ -319,6 +410,7 @@ def main():
     if args.uninstall:
         print("Removing voice hooks\n")
         register_hooks(remove=True)
+        remove_hotkey()
         print("\nDone. Scripts and the model are still on disk; delete "
               "%s and %s to remove them." % (DEST, MODEL_DIR))
         return 0
@@ -332,6 +424,8 @@ def main():
         say("Skipping the model download", "(--no-model)")
     copy_icon()
     check_microphone()
+    if not args.no_hotkey:
+        make_hotkey(args.hotkey)
     register_toast()
     register_hooks()
     verify()
@@ -342,7 +436,9 @@ next turn, start a new Claude Code session.
 
   python %s\\voice-toggle.py          see what is on
   python %s\\voice-voices.py --audition   pick a voice
-""" % (DEST, DEST))
+
+%s pauses or resumes speech from anywhere -- useful when a phone rings.
+""" % (DEST, DEST, args.hotkey if not args.no_hotkey else "voice-toggle.py pause"))
     return 0
 
 

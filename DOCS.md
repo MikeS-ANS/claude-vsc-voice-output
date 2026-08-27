@@ -22,7 +22,7 @@ cd $env:USERPROFILE\.claude\hooks
 | --- | --- |
 | See what's currently on | `python voice-toggle.py` |
 | **Shut it up right now** | `python voice-toggle.py stop` |
-| **Cut it off, hear it later** | `python voice-toggle.py pause` |
+| **Pause / resume** | **`Ctrl+Alt+P`** — or `python voice-toggle.py pause` |
 | **Turn speech off** | `python voice-toggle.py off` |
 | **Turn speech back on** | `python voice-toggle.py on` |
 | Speak only when I step away | `python voice-toggle.py quiet` |
@@ -227,20 +227,50 @@ one window is live, and `announce_session` can force it `always` or `never`.
 
 ## Stopping speech that is already playing
 
-`voice-toggle.py off` only affects future turns. To cut off something mid-sentence — the
-phone rings while a backlog is playing — there are two commands:
+### Ctrl+Alt+P
+
+A phone ringing does not leave time to open a terminal, so `install.py` registers a global
+shortcut. **Press `Ctrl+Alt+P` to pause, press it again to resume.** One key, both
+directions — you should not have to remember which state you are in.
+
+It works from any application, including while you are in a call, and flashes no console
+window (it runs through `pythonw.exe`). A toast confirms which way it went, since a hotkey
+has nowhere to print.
 
 ```powershell
-python voice-toggle.py stop      # silence now, and throw away what is queued
-python voice-toggle.py pause     # silence now, keep the queue for later
+python install.py --hotkey "CTRL+ALT+M"   # a different combination
+python install.py --no-hotkey             # skip it
 ```
 
-**`pause` loses nothing.** The summary being spoken has already been taken off the queue,
-and the code that would put it back lives in the worker that is being killed — so the
-worker records what it is playing, and `pause` puts that record back at its original
-position. You hear it from the start on your next turn.
+> The shortcut is a `.lnk` in your Start Menu, because Windows only honours a shortcut's
+> hotkey when it lives in the Start Menu or on the Desktop.
 
-`stop` is the same thing plus emptying the queue, for when you do not want any of it.
+### Pause is a hold, not a one-off
+
+Pausing stops the audio *and* holds everything afterwards: later turns keep queueing
+summaries but none are spoken until you resume. That matters for the case it exists for —
+a call lasts longer than one turn.
+
+**Nothing is discarded.** The summary being spoken has already been taken off the queue,
+and the code that would put it back lives in the worker being killed, so the worker records
+what it is playing and pause restores that record at its original position. On resume you
+hear it from the beginning — audio cannot be resumed mid-sentence, so it replays whole.
+
+A pause has no timeout. `voice-toggle.py` reports it prominently for that reason, since a
+forgotten pause otherwise looks exactly like a broken install:
+
+```
+Speech      : PAUSED 12 min ago -- run 'pause' again to resume
+```
+
+### Stop
+
+```powershell
+python voice-toggle.py stop      # silence now, throw away the queue, no hold
+```
+
+For when you want none of the backlog. Unlike pause it does not hold, so the next turn
+speaks normally.
 
 ### It also cuts itself off
 
