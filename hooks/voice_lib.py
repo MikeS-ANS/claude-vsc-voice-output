@@ -18,6 +18,18 @@ STATE_DIR = os.environ.get("CLAUDE_VOICE_STATE",
                            os.path.join(tempfile.gettempdir(), "claude_voice"))
 LOCK_PATH = os.path.join(STATE_DIR, "speak.lock")
 
+
+def audio_lock_path():
+    """The audio device lock file.
+
+    Derived in one place on purpose: acquire and release each built this path
+    themselves and disagreed about the suffix, so releasing never deleted the
+    file the acquirer had created. The lock was only ever freed by its staleness
+    timer, which is why speech went quiet for minutes at a time.
+    Derived at call time, not cached, so tests can repoint STATE_DIR.
+    """
+    return LOCK_PATH + ".lck"
+
 DEFAULTS = {
     "speak": True,
     "toast": True,
@@ -123,20 +135,70 @@ def os_idle_seconds():
         return 0.0
 
 
-def acquire_lock(timeout=90, stale_after=300):
+_STILL_ACTIVE = 259
+
+
+def pid_alive(pid):
+    """True if that process is still running. Cheap, no subprocess."""
+    if not pid:
+        return False
+    try:
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            ok = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+            return bool(ok) and code.value == _STILL_ACTIVE
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+    except Exception:
+        return True          # unsure: treat as alive rather than steal a live lock
+
+
+def acquire_lock(timeout=30, stale_after=60):
+    """Take the audio device lock.
+
+    The lock records its owner's PID. A worker that gets killed mid-utterance --
+    which is exactly what stopping speech does -- cannot run its own cleanup, so
+    without an ownership check the lock would sit there wedging every later
+    utterance until it aged out. A dead owner means the lock is free.
+    """
     os.makedirs(STATE_DIR, exist_ok=True)
+    path = audio_lock_path()
     deadline = time.time() + timeout
     while True:
         try:
-            os.close(os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                os.write(fd, str(os.getpid()).encode())
+            finally:
+                os.close(fd)
             return True
         except FileExistsError:
+            owner = None
             try:
-                if time.time() - os.path.getmtime(LOCK_PATH) > stale_after:
-                    os.unlink(LOCK_PATH)
-                    continue
+                with open(path, "r", encoding="utf-8") as f:
+                    owner = int((f.read() or "").strip())
+            except (OSError, ValueError):
+                owner = None
+
+            try:
+                age = time.time() - os.path.getmtime(path)
             except OSError:
-                pass
+                continue
+
+            if (owner and not pid_alive(owner)) or age > stale_after:
+                log_problem("audio lock held by a dead process (pid=%s, %.0fs); taking it"
+                            % (owner, age))
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+                continue
+
             if time.time() >= deadline:
                 return False
             time.sleep(0.1)
@@ -146,7 +208,7 @@ def acquire_lock(timeout=90, stale_after=300):
 
 def release_lock():
     try:
-        os.unlink(LOCK_PATH)
+        os.unlink(audio_lock_path())
     except OSError:
         pass
 
@@ -1208,8 +1270,12 @@ def stop_speaking(discard=False, hold=False):
     stopped = False
     if pid and pid != os.getpid():
         stopped = _kill_tree(pid)
-    # The worker cannot run its own cleanup once killed.
+    # The worker cannot run its own cleanup once killed, so release what it held.
+    # Unconditionally: a worker that already crashed leaves the same orphaned
+    # audio lock, and that case reports stopped=False because there was nothing
+    # left to kill. Stopping speech means nobody should be holding the device.
     release_speaker()
+    release_lock()
 
     discarded = 0
     interrupted = take_inflight()
@@ -1368,10 +1434,14 @@ def drain_pending(cfg=None):
             clear_inflight()
 
             if result == "interrupted":
+                # Back on the queue, then round again: the top of the loop waits
+                # out a call or dictation and speaks it once that clears. Exiting
+                # here meant a summary sat silent until the next turn, which is
+                # not what "it stopped because you picked up" should mean.
                 requeue(item)
-                log_problem("cut off mid-sentence (%s); requeued it whole"
+                log_problem("cut off mid-sentence (%s); requeued, will retry"
                             % (hold_reason(cfg) or "stopped"))
-                return
+                continue
             if result == "deferred":
                 # Held mid-synthesis. Put it back, unless this window produced a
                 # newer summary in the meantime -- then the newer one stands.

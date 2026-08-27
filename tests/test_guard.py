@@ -173,6 +173,43 @@ after = vl.queue_items()[0]
 checks.append(("a requeue keeps the original arrival time",
                abs((after.get("created") or 0) - (original.get("created") or 0)) < 0.001))
 
+# --- an interruption must RETRY once the reason clears --------------------
+# Opening a dictation app mid-sentence cut the audio and then exited, leaving the
+# summary queued until the next turn. It should wait the mic out and speak it.
+import threading
+
+reset(arm=False)
+mic["busy"] = False
+vl.enqueue("cut off, then spoken once the mic frees up", "A", "My Project")
+
+state = {"plays": 0}
+
+
+def play_once_then_free(wav, interrupt_check=None, poll=0.5, **kw):
+    """Busy on the first attempt; a timer frees the mic during the wait."""
+    state["plays"] += 1
+    if state["plays"] == 1:
+        mic["busy"] = True                       # dictation starts mid-sentence
+        threading.Timer(3.0, lambda: mic.__setitem__("busy", False)).start()
+        return "the microphone is in use"
+    played.append(wav)
+    return True
+
+
+real_play3 = vl._play_wav
+vl._play_wav = play_once_then_free
+
+vl.drain_pending({"respect_microphone": True, "respect_lock": False,
+                  "max_defer_seconds": 20, "max_stale_seconds": 0,
+                  "announce_session": "auto", "microphone_ignore": []})
+vl._play_wav = real_play3
+
+checks.append(("an interrupted summary is retried, not abandoned",
+               state["plays"] >= 2))
+checks.append(("...and it is eventually spoken", len(played) == 1))
+checks.append(("...and the queue ends up empty", vl.queue_depth() == 0))
+mic["busy"] = False
+
 vl._play_wav = real_play
 reset()
 print()

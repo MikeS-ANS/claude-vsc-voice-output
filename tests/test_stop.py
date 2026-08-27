@@ -244,6 +244,74 @@ try:
 except OSError:
     pass
 
+# --- a killed worker must not wedge speech --------------------------------
+# Stopping speech kills the worker, which cannot then run its own cleanup. The
+# audio lock it held used to sit there until it aged out, so every later
+# utterance spun and gave up: "resumed" said yes and nothing played.
+AUDIO_LOCK = vl.audio_lock_path()
+
+
+def clear_audio_lock():
+    try:
+        os.unlink(AUDIO_LOCK)
+    except OSError:
+        pass
+
+
+reset()
+clear_audio_lock()
+dead = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+dead.kill()
+dead.wait()
+time.sleep(0.3)
+checks.append(("a killed process reads as not alive", not vl.pid_alive(dead.pid)))
+checks.append(("this process reads as alive", vl.pid_alive(os.getpid())))
+
+with open(AUDIO_LOCK, "w", encoding="utf-8") as f:
+    f.write(str(dead.pid))
+t0 = time.time()
+got = vl.acquire_lock()
+took = time.time() - t0
+checks.append(("a lock owned by a dead process is taken", got is True))
+checks.append(("...immediately, not after a long spin (%.2fs)" % took, took < 3))
+vl.release_lock()
+
+holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)"])
+time.sleep(0.4)
+with open(AUDIO_LOCK, "w", encoding="utf-8") as f:
+    f.write(str(holder.pid))
+checks.append(("a lock owned by a LIVE process is respected",
+               vl.acquire_lock(timeout=1) is False))
+holder.kill()
+holder.wait()
+clear_audio_lock()
+
+# stop_speaking must release the audio lock it just orphaned
+reset()
+with open(AUDIO_LOCK, "w", encoding="utf-8") as f:
+    f.write(str(os.getpid()))
+vl.set_inflight({"text": "x", "session": "A", "label": "L", "created": time.time()})
+with open(vl.SPEAKER_LOCK, "w", encoding="utf-8") as f:
+    f.write(str(os.getpid() + 1))          # a pid that is not us and not alive
+vl.stop_speaking(discard=True)
+checks.append(("stopping speech clears the audio lock too",
+               not os.path.exists(AUDIO_LOCK)))
+clear_audio_lock()
+
+# release_lock must delete the file acquire_lock created. These built the path
+# separately and disagreed about the suffix, so the lock was never released and
+# only its staleness timer ever freed it -- minutes of silence at a time.
+reset()
+clear_audio_lock()
+got = vl.acquire_lock(timeout=2)
+checks.append(("acquire_lock takes the lock", got is True and os.path.exists(AUDIO_LOCK)))
+vl.release_lock()
+checks.append(("release_lock actually releases it", not os.path.exists(AUDIO_LOCK)))
+checks.append(("...so it can be taken again straight away",
+               vl.acquire_lock(timeout=2) is True))
+vl.release_lock()
+clear_audio_lock()
+
 reset()
 print()
 ok = True

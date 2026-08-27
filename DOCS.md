@@ -421,6 +421,12 @@ speaks anyway. Machine-wide idle time alone gets that case wrong.
 
 ### It went quiet
 
+If it went quiet for minutes and then recovered on its own, that was the audio lock bug
+fixed in this repo's history: `acquire_lock` and `release_lock` built the lock's path
+separately and disagreed about the suffix, so releasing never deleted the file the acquirer
+created and only the staleness timer ever freed it. The lock now records its owner's PID and
+a dead owner releases it immediately, so a killed or crashed worker cannot wedge speech.
+
 ```powershell
 python voice-toggle.py    # is it on? is something holding it?
 type voice-spoken.log     # what was spoken, and when
