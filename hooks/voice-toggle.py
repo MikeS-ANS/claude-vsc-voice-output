@@ -109,20 +109,24 @@ def main():
 
     if args[0] in ("pause", "hold", "resume", "toggle"):
         # One command, both directions, so a single hotkey can do the job.
-        if vl.is_paused():
-            depth = vl.resume_speaking()
-            print("Resumed." + (" Speaking %d waiting summary(s)." % depth
-                                if depth else " Nothing was waiting."))
+        # A hotkey can fire twice per press, so the decision is made atomically
+        # inside toggle_pause rather than here.
+        outcome = vl.toggle_pause()
+        if outcome == "ignored":
+            print("Ignored -- duplicate keypress.")
+            return 0
+
+        action, count = outcome
+        if action == "resumed":
+            print("Resumed." + (" Speaking %d waiting summary(s)." % count
+                                if count else " Nothing was waiting."))
             _notify("Claude voice resumed",
-                    "Speaking %d waiting summary(s)." % depth if depth
+                    "Speaking %d waiting summary(s)." % count if count
                     else "Nothing was waiting.")
         else:
-            stopped, _ = vl.stop_speaking(discard=False, hold=True)
-            depth = vl.queue_depth()
-            print("Paused%s. %d summary(s) held -- press again to resume."
-                  % (" mid-sentence" if stopped else "", depth))
+            print("Paused. %d summary(s) held -- press again to resume." % count)
             _notify("Claude voice paused",
-                    "%d summary(s) held. Press the shortcut again to resume." % depth)
+                    "%d summary(s) held. Press the shortcut again to resume." % count)
         return 0
 
     if args[0] in ("lock", "locked", "screen"):

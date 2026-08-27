@@ -1090,6 +1090,88 @@ def paused_since():
         return None
 
 
+TOGGLE_LOCK = os.path.join(STATE_DIR, "toggle.lck")     # held only while toggling
+TOGGLE_STAMP = os.path.join(STATE_DIR, "toggle.stamp")  # when a toggle last counted
+TOGGLE_DEBOUNCE = 1.0                                   # one press must count once
+_TOGGLE_STALE = 10.0                                    # a crashed toggle unblocks
+
+
+def _grab_toggle_lock():
+    """Take the toggle mutex without waiting. False means someone else has it.
+
+    Not a retry loop: contention here means the same keypress arriving twice, and
+    the right answer is to do nothing rather than queue up behind the first.
+    Deliberately non-blocking, because a delete-then-recreate retry let two
+    callers both believe they had won.
+    """
+    state_dir()
+    try:
+        os.close(os.open(TOGGLE_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        return True
+    except FileExistsError:
+        pass
+    except Exception:
+        return True                      # never block the user on bookkeeping
+
+    try:
+        if time.time() - os.path.getmtime(TOGGLE_LOCK) < _TOGGLE_STALE:
+            return False                 # genuinely in use
+        os.unlink(TOGGLE_LOCK)           # left behind by a crash
+        os.close(os.open(TOGGLE_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        return True
+    except Exception:
+        return False
+
+
+def _drop_toggle_lock():
+    try:
+        os.unlink(TOGGLE_LOCK)
+    except OSError:
+        pass
+
+
+def _toggle_too_soon(debounce):
+    """True if the last accepted toggle was within the debounce window."""
+    try:
+        with open(TOGGLE_STAMP, "r", encoding="utf-8") as f:
+            return (time.time() - float(f.read().strip())) < debounce
+    except (OSError, ValueError):
+        return False
+
+
+def _mark_toggled():
+    try:
+        with open(TOGGLE_STAMP, "w", encoding="utf-8") as f:
+            f.write(str(time.time()))
+    except OSError:
+        pass
+
+
+def toggle_pause(debounce=TOGGLE_DEBOUNCE):
+    """Pause if speaking, resume if paused.
+
+    Returns ("paused", held) / ("resumed", waiting) / "ignored".
+
+    A Windows shortcut hotkey can fire more than once per press, and the toggle
+    is a read-then-write, so unguarded duplicates cancelled out: pause then
+    resume then pause left it paused and the key looked dead. The mutex stops
+    two invocations interleaving; the stamp catches a duplicate that arrives
+    after the first has already finished.
+    """
+    if not _grab_toggle_lock():
+        return "ignored"
+    try:
+        if _toggle_too_soon(debounce):
+            return "ignored"
+        _mark_toggled()
+        if is_paused():
+            return "resumed", resume_speaking()
+        stop_speaking(discard=False, hold=True)
+        return "paused", queue_depth()
+    finally:
+        _drop_toggle_lock()
+
+
 def speaking_pid():
     """PID of the worker currently draining the queue, or None."""
     try:

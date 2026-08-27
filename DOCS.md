@@ -237,6 +237,17 @@ It works from any application, including while you are in a call, and flashes no
 window (it runs through `pythonw.exe`). A toast confirms which way it went, since a hotkey
 has nowhere to print.
 
+> **Why the toggle is guarded.** A Windows shortcut hotkey can fire several invocations for
+> one press. Because the toggle reads the paused state and then writes it, unguarded
+> duplicates cancelled out — pause, resume, pause — leaving it paused, so the key appeared
+> dead and only worked after enough presses to hit a lucky interleaving. It now takes a
+> non-blocking mutex (contention means a duplicate, so do nothing) plus a one-second stamp
+> for a duplicate that lands after the first finished. Verified with up to eight concurrent
+> invocations per press: exactly one acts, every time.
+>
+> The practical cost: two *deliberate* presses inside one second count as one. A real second
+> press that fast is almost certainly the OS repeating itself.
+
 ```powershell
 python install.py --hotkey "CTRL+ALT+M"   # a different combination
 python install.py --no-hotkey             # skip it

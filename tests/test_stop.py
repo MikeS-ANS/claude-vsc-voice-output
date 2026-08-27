@@ -190,6 +190,60 @@ checks.append(("pausing mid-sentence interrupts playback", result == "interrupte
 vl._play_wav = real_play2
 vl.clear_paused()
 
+# --- one keypress must count once, even when the OS fires it twice --------
+# A Windows shortcut hotkey can deliver several invocations per press. The toggle
+# is a read-then-write, so duplicates used to interleave as pause -> resume ->
+# pause and leave it paused: the key looked dead.
+import threading
+
+reset()
+vl.clear_paused()
+try:
+    os.unlink(vl.TOGGLE_LOCK)
+except OSError:
+    pass
+
+
+def double_fire():
+    """Simulate one press delivered as two concurrent invocations."""
+    out = []
+    threads = [threading.Thread(target=lambda: out.append(vl.toggle_pause()))
+               for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    kinds = [o if isinstance(o, str) else o[0] for o in out]
+    return kinds
+
+
+kinds = double_fire()
+checks.append(("a double-fired press acts exactly once",
+               kinds.count("ignored") == 1 and
+               (kinds.count("paused") + kinds.count("resumed")) == 1))
+checks.append(("...and it paused", vl.is_paused()))
+
+time.sleep(1.1)                              # a genuinely separate press
+kinds = double_fire()
+checks.append(("the next press acts exactly once too",
+               kinds.count("ignored") == 1))
+checks.append(("...and it resumed", not vl.is_paused()))
+
+# Six presses must alternate, not stick.
+states = []
+for _ in range(6):
+    time.sleep(1.1)
+    double_fire()
+    states.append(vl.is_paused())
+checks.append(("six presses alternate cleanly",
+               states == [True, False, True, False, True, False]))
+
+vl.clear_paused()
+try:
+    os.unlink(vl.TOGGLE_LOCK)
+except OSError:
+    pass
+
 reset()
 print()
 ok = True
