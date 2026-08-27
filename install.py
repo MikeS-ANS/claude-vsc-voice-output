@@ -12,8 +12,10 @@ What it does:
   3. downloads the Kokoro model into %USERPROFILE%\\.cache\\kokoro-onnx
   4. copies the Claude icon out of your installed VS Code extension
   5. registers a toast identity so notifications say "Claude VSC Notice"
-  6. registers three hooks in %USERPROFILE%\\.claude\\settings.json
-  7. speaks a line so you know it works
+  6. checks for apps that hold the microphone permanently, which would
+     otherwise silence speech for good, and offers to ignore them
+  7. registers three hooks in %USERPROFILE%\\.claude\\settings.json
+  8. speaks a line so you know it works
 
 It never overwrites an existing voice-config.json, and it leaves any hooks it
 did not create alone.
@@ -155,6 +157,80 @@ def copy_icon():
         say(" icon copied", "from the installed extension")
 
 
+ALWAYS_ON_MIC_HOURS = 2
+
+
+def _duration(seconds):
+    hours = seconds / 3600.0
+    return "%.0f hours" % hours if hours < 48 else "%.0f days" % (hours / 24.0)
+
+
+def check_microphone():
+    """Offer to ignore apps that hold the microphone permanently.
+
+    Speech is held while an app holds the mic, so an app that never releases it
+    silences speech FOREVER -- and the only clue is a line in voice-errors.log,
+    which nobody reads until they wonder why it went quiet. A real call lasts
+    minutes; anything holding the device for hours is a companion app (headset,
+    mouse, softphone, virtual audio device). Much cheaper to ask here than to
+    debug silence later.
+    """
+    # SRC_HOOKS, not DEST: this installer ships alongside the voice_lib it was
+    # written against. An older installed copy may predate microphone_holders().
+    sys.path.insert(0, SRC_HOOKS)
+    try:
+        import voice_lib as vl
+        holders = vl.microphone_holders()
+    except Exception as exc:
+        say("Microphone check", "skipped (%s)" % exc.__class__.__name__)
+        return                                  # never block an install on this
+
+    stuck = [(n, h) for n, h in holders if h >= ALWAYS_ON_MIC_HOURS * 3600]
+    if not stuck:
+        say("Microphone check", "nothing is holding the mic open")
+        return
+
+    cfg_path = os.path.join(DEST, "voice-config.json")
+    try:
+        cfg = json.load(io.open(cfg_path, encoding="utf-8"))
+    except Exception:
+        return
+    ignore = list(cfg.get("microphone_ignore") or [])
+
+    fresh = []
+    say("Microphone check")
+    for name, held in stuck:
+        label = vl.mic_app_label(name)
+        known = any(str(pat).lower() in label.lower() for pat in ignore)
+        say(" %s has held the microphone for %s%s"
+            % (label, _duration(held), "  (already ignored)" if known else ""))
+        if not known:
+            fresh.append(label)
+
+    if not fresh:
+        return
+
+    print("\n  Speech is suppressed while an app holds the microphone, so it would stay"
+          "\n  silent indefinitely. Say no if any of these holds the mic ONLY during real"
+          "\n  calls -- ignoring such an app means speech will talk over them.\n")
+
+    if not act("add %s to microphone_ignore" % ", ".join(fresh)):
+        return
+    try:
+        answer = input("  Add %s to microphone_ignore? [Y/n] " % ", ".join(fresh)).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        answer = "n"
+    if answer and not answer.startswith("y"):
+        say(" left alone", "edit microphone_ignore in %s if it goes quiet" % cfg_path)
+        return
+
+    cfg["microphone_ignore"] = ignore + fresh
+    io.open(cfg_path, "w", encoding="utf-8", newline="\n").write(
+        json.dumps(cfg, indent=2) + "\n")
+    say(" microphone_ignore", "now %s" % cfg["microphone_ignore"])
+
+
 def register_toast():
     script = os.path.join(DEST, "voice-setup-toast.py")
     if not os.path.isfile(script):
@@ -255,6 +331,7 @@ def main():
     else:
         say("Skipping the model download", "(--no-model)")
     copy_icon()
+    check_microphone()
     register_toast()
     register_hooks()
     verify()

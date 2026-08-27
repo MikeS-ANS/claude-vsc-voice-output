@@ -180,8 +180,18 @@ immediately before playback. If either changed, the audio is not played and the 
 goes back on the queue.
 
 > `microphone_ignore` exists for apps that hold the mic all day rather than only during
-> calls. It ships **empty on purpose**: every app tested here releases the mic properly,
-> and an entry in this list means speech will talk over that app's calls.
+> calls. It ships **empty on purpose**, and an entry in this list means speech will talk
+> over that app's calls -- so only add an app you are sure never releases the mic on its own.
+>
+> Not every machine is so lucky, and the failure is silent: an app that holds the mic
+> permanently suppresses speech forever, with the only clue a line in `voice-errors.log`.
+> A Logitech G Hub install was found holding the microphone for **44 days straight**.
+> `install.py` now checks for holders older than a couple of hours and offers to add them,
+> so this is a question at install time rather than a mystery afterwards. To check by hand:
+>
+> ```powershell
+> python voice-say.py --mic
+> ```
 
 ### You're working in another window
 
