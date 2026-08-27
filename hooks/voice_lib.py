@@ -1334,22 +1334,28 @@ def stop_speaking(discard=False, hold=False):
     undone by the next one.
     Returns (stopped_something, how_many_discarded).
     """
-    pid = speaking_pid()
+    # Kill whoever actually holds the audio device, not just the drain worker.
+    # Those are normally the same process, but they can come apart -- a worker
+    # that lost its speaker lock while still playing left nothing to target, so
+    # a press reported success and the audio carried on regardless. The audio
+    # lock's owner is by definition the process making sound.
+    worker = speaking_pid()
+    player = audio_lock_owner()
+    targets = [p for p in dict.fromkeys([player, worker]) if p and p != os.getpid()]
+
     stopped = False
-    if pid and pid != os.getpid():
-        stopped = _kill_tree(pid)
+    survivors = []
+    for target in targets:
+        if _kill_tree(target):
+            stopped = True
+        elif pid_alive(target):
+            survivors.append(target)
 
-    # Release only what nobody is still holding. Releasing a lock while its
-    # owner is alive and talking is how two summaries ended up playing at once:
-    # the survivor kept speaking with no lock held, so the next worker started
-    # straight over the top of it.
-    if pid is None or stopped or not pid_alive(pid):
-        release_speaker()
+    if survivors:
+        log_problem("still alive after stopping: %s; leaving their locks alone"
+                    % ", ".join(str(p) for p in survivors))
     else:
-        log_problem("worker %s is still alive; leaving its locks alone" % pid)
-
-    owner = audio_lock_owner()
-    if owner is None or not pid_alive(owner) or owner == pid and stopped:
+        release_speaker()
         release_lock()
 
     discarded = 0
@@ -1373,8 +1379,10 @@ def stop_speaking(discard=False, hold=False):
     else:
         clear_paused()
 
-    log_problem("speech stopped by hand (pid=%s, discarded=%d, kept=%s, held=%s)"
-                % (pid, discarded, bool(interrupted and not discard), bool(hold)))
+    log_problem("speech stopped by hand (targets=%s, killed=%s, discarded=%d, "
+                "kept=%s, held=%s)"
+                % (targets or "none", stopped, discarded,
+                   bool(interrupted and not discard), bool(hold)))
     return stopped, discarded
 
 

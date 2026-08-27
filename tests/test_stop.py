@@ -401,6 +401,53 @@ checks.append(("...but once that owner dies the lock is free",
 vl.release_lock()
 clear_audio_lock()
 
+# --- the thing making sound must be stopped, even with no speaker lock ----
+# A worker that lost its speaker lock while still playing left nothing to
+# target: the press reported success, released the locks, and the audio carried
+# on -- then the next worker took the free lock and played over the top of it.
+reset()
+clear_audio_lock()
+player = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+time.sleep(0.6)
+with open(AUDIO_LOCK, "w", encoding="utf-8") as f:
+    f.write(str(player.pid))              # holds the device
+# deliberately NO speaker lock: the state that broke it
+try:
+    os.unlink(vl.SPEAKER_LOCK)
+except OSError:
+    pass
+
+stopped, _ = vl.stop_speaking(discard=False)
+checks.append(("with no speaker lock, the audio holder is still killed",
+               stopped is True))
+checks.append(("...and it is genuinely gone", not vl.pid_alive(player.pid)))
+checks.append(("...and the audio lock is freed", not os.path.exists(AUDIO_LOCK)))
+try:
+    player.kill()
+except Exception:
+    pass
+clear_audio_lock()
+
+# both owners get stopped when they differ
+reset()
+clear_audio_lock()
+a = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+b = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+time.sleep(0.7)
+with open(AUDIO_LOCK, "w", encoding="utf-8") as f:
+    f.write(str(a.pid))
+with open(vl.SPEAKER_LOCK, "w", encoding="utf-8") as f:
+    f.write(str(b.pid))
+vl.stop_speaking(discard=False)
+checks.append(("a split audio/worker pair: both are stopped",
+               not vl.pid_alive(a.pid) and not vl.pid_alive(b.pid)))
+for proc in (a, b):
+    try:
+        proc.kill()
+    except Exception:
+        pass
+clear_audio_lock()
+
 reset()
 print()
 ok = True
