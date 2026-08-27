@@ -19,8 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import voice_lib as vl
 from _isolate import isolate, stub_synthesis
 
-isolate(vl)          # private state dir; no cross-suite leakage
-stub_synthesis(vl)   # instant, silent synthesis
+isolate(vl)                         # private state dir; no cross-suite leakage
 
 # These suites test queue/mic logic, not lock handling, and may run on a
 # locked machine -- pin the lock signal off.

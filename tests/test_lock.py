@@ -18,8 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import voice_lib as vl
 from _isolate import isolate, stub_synthesis
 
-isolate(vl)          # private state dir; no cross-suite leakage
-stub_synthesis(vl)   # instant, silent synthesis
+isolate(vl)                         # private state dir; no cross-suite leakage
 
 spoken = []
 # **kw so adding a parameter to speak() cannot silently break the suite

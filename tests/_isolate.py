@@ -71,22 +71,24 @@ def set_config(vl, **values):
 def stub_synthesis(vl, on_synth=None):
     """Make synthesis instant and audio-free.
 
-    Centralised deliberately: suites used to patch voice_lib internals directly,
-    so every change to how synthesis works broke several of them at once -- and a
-    broken suite reports zero assertions, which reads as "nothing ran" rather
-    than "something failed".
+    Centralised deliberately: suites used to patch voice_lib's synthesis
+    internals directly, so each change to how synthesis works broke several at
+    once -- and a broken suite reports zero assertions, which reads as "nothing
+    ran" rather than "something failed". Point this at the current seam and the
+    suites do not need to know what it is.
     """
-    def _start(engine, text, wav, cfg):
+    def _synth(text_file, wav, voice, rate):
         if on_synth is not None:
-            on_synth(text)
+            try:
+                with open(text_file, "r", encoding="utf-8") as f:
+                    on_synth(f.read())
+            except OSError:
+                on_synth("")
         try:
             with open(wav, "wb") as f:
                 f.write(b"x")
         except OSError:
-            return None
-        return {"kind": "stub", "wav": wav, "ok": True}
+            return False
+        return True
 
-    vl._synth_start = _start
-    vl._synth_finish = lambda handle, timeout=300: bool(handle)
-    vl._synth_server_start = lambda: None
-    vl.synth_server_stop = lambda: None
+    vl._synth_kokoro = _synth

@@ -256,6 +256,26 @@ python install.py --no-hotkey             # skip it
 > The shortcut is a `.lnk` in your Start Menu, because Windows only honours a shortcut's
 > hotkey when it lives in the Start Menu or on the Desktop.
 
+### What pause cannot do
+
+It cannot resume where it stopped. A summary is synthesised as one audio file and handed to
+a player that blocks until finished; nothing reads back how far it got, so a resume replays
+the whole summary — and pays the synthesis cost again, which for 80 words is 15–20 seconds
+before any sound.
+
+Speaking sentence by sentence was tried, so that a resume could pick up at a sentence
+boundary and the first word could arrive sooner. It was reverted: **the pauses between
+sentences were worse than the problem being solved.** Synthesis is not fast enough to hide
+in the gap even with the model held in memory and the next sentence built during playback.
+
+So if you need silence immediately, mute your speakers — that is genuinely the better tool.
+`stop` and `pause` are for deciding you do not want the backlog, not for a quick hush.
+
+**The automatic microphone cut-off is the one that matters** and it works properly: pick up
+a call or start dictating and the audio stops within about half a second, then resumes when
+you are done. That covers most of what a manual pause was reaching for, without the
+tradeoffs.
+
 ### Pause is a hold, not a one-off
 
 Pausing stops the audio *and* holds everything afterwards: later turns keep queueing

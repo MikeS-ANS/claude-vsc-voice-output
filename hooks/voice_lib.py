@@ -384,13 +384,13 @@ def _synth_kokoro(text_file, wav, voice, rate):
     return True
 
 
-def _play_wav(wav, interrupt_check=None, poll=0.25):
+def _play_wav(wav, interrupt_check=None, poll=0.5):
     """Play a WAV file.
 
     Returns True if it played, False on failure, or a reason string if
-    interrupt_check said to stop partway. PlaySync blocks for the whole clip, so
-    interrupting means killing the player -- the only way to react to a call that
-    starts mid-sentence.
+    interrupt_check said to stop partway. PlaySync blocks for the whole
+    utterance, so interrupting means killing the player -- which is the only way
+    to react to a call that starts mid-sentence.
     """
     if interrupt_check is None:
         return run_powershell(_PLAY_WAV_PS, {"CV_WAV_FILE": wav})
@@ -409,7 +409,7 @@ def _play_wav(wav, interrupt_check=None, poll=0.25):
     while proc.poll() is None:
         reason = interrupt_check()
         if reason:
-            _kill_tree(proc.pid)
+            _kill_tree(proc.pid, image="powershell.exe")
             try:
                 proc.wait(timeout=5)
             except Exception:
@@ -419,302 +419,98 @@ def _play_wav(wav, interrupt_check=None, poll=0.25):
     return proc.returncode == 0
 
 
-# --- Chunking ---------------------------------------------------------------
+def speak(text, cfg=None, guard=None, interrupt=None):
+    """Speak text aloud.
 
-_SENTENCE_RE = re.compile(r"[^.!?]+(?:[.!?]+|$)")
+    Engine order: Kokoro (local neural) -> WinRT -> SAPI. Each fallback is a
+    downgrade in voice quality, never a drop to silence.
 
-
-def split_sentences(text, min_words=6, max_words=26):
-    """Break a summary into speakable chunks, roughly one sentence each.
-
-    Chunks are the unit of both progress and latency: only the first has to be
-    synthesised before audio starts, and a pause resumes at a chunk boundary
-    rather than back at the beginning. Very short sentences are merged so a
-    stray "Done." does not become its own chunk, and very long ones are split on
-    commas so no single chunk reintroduces the original delay.
-    """
-    parts = [m.group(0).strip() for m in _SENTENCE_RE.finditer(text or "")]
-    parts = [p for p in parts if p]
-
-    merged = []
-    for part in parts:
-        # Merge when either side is too short to be worth its own chunk: a
-        # trailing "Done." should ride along with the sentence before it.
-        if merged:
-            prev_short = len(merged[-1].split()) < min_words
-            this_short = len(part.split()) < min_words
-            combined = len((merged[-1] + " " + part).split())
-            if (prev_short or this_short) and combined <= max_words:
-                merged[-1] = (merged[-1] + " " + part).strip()
-                continue
-        merged.append(part)
-
-    out = []
-    for chunk in merged:
-        if len(chunk.split()) <= max_words:
-            out.append(chunk)
-            continue
-        buf = ""
-        for piece in [p.strip() for p in chunk.split(",") if p.strip()]:
-            candidate = (buf + ", " + piece) if buf else piece
-            if buf and len(candidate.split()) > max_words:
-                out.append(buf)
-                buf = piece
-            else:
-                buf = candidate
-        if buf:
-            out.append(buf)
-
-    return out or ([text] if text else [])
-
-
-# --- Synthesis --------------------------------------------------------------
-
-_synth_server = {"proc": None}
-
-
-def _synth_server_start():
-    """Start (or reuse) the Kokoro process that holds the model.
-
-    Loading the model costs several seconds, and it was being paid once per
-    chunk -- which made speaking sentence by sentence slower overall than not
-    chunking at all. Paid once here, a sentence then takes about a second, short
-    enough to hide behind the previous one still playing.
-    """
-    proc = _synth_server["proc"]
-    if proc is not None and proc.poll() is None:
-        return proc
-    if not kokoro_available():
-        return None
-    try:
-        proc = subprocess.Popen(
-            [KOKORO_PY, KOKORO_SYNTH, "--server"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            text=True, bufsize=1, creationflags=_CREATE_NO_WINDOW)
-        ready = proc.stdout.readline()          # blocks until the model is loaded
-        if not ready or '"ready"' not in ready:
-            log_problem("kokoro server did not come up: %r" % (ready or "")[:120])
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            return None
-    except Exception as exc:
-        log_problem("kokoro server could not start: %r" % (exc,))
-        return None
-    _synth_server["proc"] = proc
-    return proc
-
-
-def synth_server_stop():
-    proc = _synth_server["proc"]
-    _synth_server["proc"] = None
-    if proc is None:
-        return
-    try:
-        if proc.poll() is None:
-            proc.stdin.write(json.dumps({"quit": True}) + "\n")
-            proc.stdin.flush()
-            proc.wait(timeout=5)
-    except Exception:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-
-
-def _synth_start(engine, text, wav, cfg):
-    """Ask for one chunk. Returns a handle to wait on, or None.
-
-    Requested rather than completed so the next chunk is built while the current
-    one plays; without that overlap every sentence boundary is a silence.
-    """
-    if engine == "kokoro":
-        proc = _synth_server_start()
-        if proc is None:
-            return None
-        try:
-            proc.stdin.write(json.dumps({
-                "text": text, "wav": wav,
-                "voice": cfg.get("voice") or "af_heart",
-                "speed": cfg.get("rate", 1.0) or 1.0,
-            }) + "\n")
-            proc.stdin.flush()
-        except Exception as exc:
-            log_problem("kokoro server went away: %r" % (exc,))
-            synth_server_stop()
-            return None
-        return {"kind": "kokoro", "proc": proc, "wav": wav}
-
-    # WinRT synthesises fast enough that a pipeline buys nothing.
-    fd, txt = tempfile.mkstemp(prefix="cv-chunk-", suffix=".txt", dir=state_dir())
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-    except OSError:
-        return None
-    ok = run_powershell(_WINRT_SPEAK_PS, {
-        "CV_TEXT_FILE": txt, "CV_WAV_FILE": wav,
-        "CV_VOICE": (cfg.get("fallback_voice") or ""),
-        "CV_RATE": cfg.get("rate", 1.0),
-    })
-    try:
-        os.unlink(txt)
-    except OSError:
-        pass
-    return {"kind": "winrt", "ok": ok and os.path.isfile(wav), "wav": wav}
-
-
-def _synth_finish(handle, timeout=300):
-    """Wait for a requested chunk. True if the WAV is ready."""
-    if not handle:
-        return False
-    if handle["kind"] != "kokoro":
-        return bool(handle.get("ok"))
-
-    proc = handle["proc"]
-    try:
-        line = proc.stdout.readline()
-    except Exception as exc:
-        log_problem("kokoro server read failed: %r" % (exc,))
-        synth_server_stop()
-        return False
-    if not line:
-        log_problem("kokoro server closed unexpectedly")
-        synth_server_stop()
-        return False
-    try:
-        reply = json.loads(line)
-    except ValueError:
-        log_problem("kokoro server said: %r" % line[:120])
-        return False
-    if not reply.get("ok"):
-        log_problem("kokoro synth failed: %s" % str(reply.get("error"))[:160])
-        return False
-    return os.path.isfile(handle["wav"])
-
-
-def speak(text, cfg=None, guard=None, interrupt=None, start_at=0, on_progress=None):
-    """Speak text aloud, one chunk at a time.
-
-    start_at skips chunks already heard, so a resume continues where it stopped.
-    on_progress(next_index) is called as each chunk finishes, so the caller can
-    record how far it got -- if playback is cut off, the last recorded index is
-    the chunk that was interrupted, and that chunk is replayed whole rather than
-    resuming mid-word.
-
-    guard is checked before each chunk; interrupt is polled during playback.
-    Returns True, False, "deferred" or "interrupted".
+    guard, if given, is called after synthesis and immediately before playback.
+    interrupt, if given, is polled DURING playback; returning a reason cuts the
+    audio off and makes this return "interrupted".
+    Returning False aborts playback and makes this return the string "deferred",
+    so the caller can requeue instead of talking over the user. Synthesis takes
+    several seconds, which is long enough for a call or dictation to start.
     """
     cfg = cfg or load_config()
     text = clean_for_speech(text)
     if not text:
         return False
 
+    rate = float(cfg.get("rate", 1.0) or 1.0)
     engine = (cfg.get("engine") or "auto").lower()
+    kokoro_voice = (cfg.get("voice") or "").strip()
+    win_voice = (cfg.get("fallback_voice") or "").strip()
+
     order = {"kokoro": ["kokoro"], "winrt": ["winrt"], "sapi": ["sapi"]}.get(
         engine, ["kokoro", "winrt", "sapi"])
 
-    chunks = split_sentences(text)
-    if start_at >= len(chunks):
-        start_at = 0                     # stale index; better to repeat than skip
-
-    if not acquire_lock():
-        log_problem("gave up waiting for the audio lock")
-        return False
+    d = state_dir()
+    fd, txt = tempfile.mkstemp(prefix="cv-", suffix=".txt", dir=d)
+    wav = os.path.join(d, "cv-speak-%d.wav" % os.getpid())
     try:
-        for eng in order:
-            if eng == "sapi":
-                # Last resort: synthesises and plays in one call, so no chunking
-                # and no interruption once it has started.
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        if not acquire_lock():
+            log_problem("gave up waiting for the audio lock")
+            return False
+        try:
+            for eng in order:
+                if eng == "kokoro":
+                    synthesised = _synth_kokoro(txt, wav, kokoro_voice, rate)
+                elif eng == "winrt":
+                    synthesised = run_powershell(_WINRT_SPEAK_PS, {
+                        "CV_TEXT_FILE": txt, "CV_WAV_FILE": wav,
+                        "CV_VOICE": win_voice, "CV_RATE": rate,
+                    }) and os.path.isfile(wav)
+                else:
+                    # SAPI synthesises and plays in one call, so the guard can
+                    # only be honoured up front for this last-resort engine.
+                    if guard is not None and not guard():
+                        log_spoken("deferred", text)
+                        return "deferred"
+                    synthesised = None
+
+                if eng == "sapi":
+                    ok = run_powershell(_SAPI_SPEAK_PS, {
+                        "CV_TEXT_FILE": txt, "CV_VOICE": win_voice,
+                        "CV_SAPI_RATE": _sapi_rate(rate),
+                    })
+                    if ok:
+                        log_spoken("spoke", text)
+                        return True
+                    log_problem("engine 'sapi' failed to speak")
+                    continue
+
+                if not synthesised:
+                    log_problem("engine %r failed to synthesise" % eng)
+                    continue
+
                 if guard is not None and not guard():
                     log_spoken("deferred", text)
                     return "deferred"
-                remaining = " ".join(chunks[start_at:])
-                fd, txt = tempfile.mkstemp(prefix="cv-", suffix=".txt", dir=state_dir())
-                try:
-                    with os.fdopen(fd, "w", encoding="utf-8") as f:
-                        f.write(remaining)
-                    ok = run_powershell(_SAPI_SPEAK_PS, {
-                        "CV_TEXT_FILE": txt, "CV_VOICE": cfg.get("fallback_voice") or "",
-                        "CV_SAPI_RATE": _sapi_rate(cfg.get("rate", 1.0) or 1.0),
-                    })
-                finally:
-                    try:
-                        os.unlink(txt)
-                    except OSError:
-                        pass
-                if ok:
-                    log_spoken("spoke", text)
-                    return True
-                log_problem("engine 'sapi' failed to speak")
-                continue
 
-            wavs = [os.path.join(state_dir(), "cv-%d-%d.wav" % (os.getpid(), n))
-                    for n in range(len(chunks))]
-            pending = _synth_start(eng, chunks[start_at], wavs[start_at], cfg)
-            if not _synth_finish(pending):
-                log_problem("engine %r could not synthesise" % eng)
-                _cleanup(wavs)
-                continue
-
-            try:
-                index = start_at
-                while index < len(chunks):
-                    if guard is not None and not guard():
-                        log_spoken("deferred", chunks[index])
-                        return "deferred"
-
-                    # Build the next chunk while this one is playing.
-                    ahead = None
-                    if index + 1 < len(chunks):
-                        ahead = _synth_start(eng, chunks[index + 1],
-                                             wavs[index + 1], cfg)
-
-                    log_spoken("start", "pid=%d [%d/%d] %s"
-                               % (os.getpid(), index + 1, len(chunks), chunks[index]))
-                    played = _play_wav(wavs[index], interrupt_check=interrupt)
-
-                    if isinstance(played, str):
-                        if ahead:
-                            _synth_finish(ahead)
-                        log_spoken("cut off", "[%d/%d] %s -- %s"
-                                   % (index + 1, len(chunks), played, chunks[index]))
-                        return "interrupted"
-                    if not played:
-                        log_problem("playback failed on engine %r" % eng)
-                        if ahead:
-                            _synth_finish(ahead)
-                        break
-
-                    index += 1
-                    if on_progress is not None:
-                        on_progress(index)      # this chunk is done; resume here
-
-                    if ahead and not _synth_finish(ahead):
-                        log_problem("engine %r failed partway through" % eng)
-                        break
-
-                if index >= len(chunks):
+                log_spoken("start", "pid=%d %s" % (os.getpid(), text))
+                played = _play_wav(wav, interrupt_check=interrupt)
+                if isinstance(played, str):
+                    log_spoken("cut off", "%s -- %s" % (played, text))
+                    return "interrupted"
+                if played:
                     if eng != order[0]:
                         log_problem("engine %r failed; fell back to %r" % (order[0], eng))
                     log_spoken("spoke", text)
                     return True
-            finally:
-                _cleanup(wavs)
-
-        log_problem("all engines failed; nothing was spoken")
-        return False
+                log_problem("playback failed on engine %r" % eng)
+            log_problem("all engines failed; nothing was spoken")
+            return False
+        finally:
+            release_lock()
     finally:
-        release_lock()
-
-
-def _cleanup(paths):
-    for path in paths:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+        for path in (txt, wav):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
 
 APP_ID = "ClaudeCode.VSC.Notice"
@@ -1200,7 +996,7 @@ def _slot(session_id, created):
                         "q-%s-%s-%d.json" % (safe_id(session_id), stamp, os.getpid()))
 
 
-def enqueue(text, session_id="default", label="", created=None, resume_at=0):
+def enqueue(text, session_id="default", label="", created=None):
     """Queue a summary. Never replaces an existing one.
 
     created preserves an item's original arrival time when it is put back after
@@ -1209,8 +1005,7 @@ def enqueue(text, session_id="default", label="", created=None, resume_at=0):
     d = queue_dir()
     when = time.time() if created is None else float(created)
     payload = json.dumps({"text": text, "created": when,
-                          "label": label, "session": safe_id(session_id),
-                          "resume_at": int(resume_at or 0)})
+                          "label": label, "session": safe_id(session_id)})
     target = _slot(session_id, when)
     fd, tmp = tempfile.mkstemp(prefix="stage-", suffix=".tmp", dir=d)
     try:
@@ -1294,14 +1089,9 @@ def dequeue_oldest():
 
 
 def requeue(item):
-    """Put a deferred summary back, keeping its place in the order AND its progress.
-
-    resume_at is how far through it was already heard, so it picks up from that
-    chunk instead of replaying the whole thing.
-    """
+    """Put a deferred summary back, keeping its original place in the order."""
     return enqueue(item.get("text", ""), item.get("session", "default"),
-                   item.get("label", ""), item.get("created"),
-                   item.get("resume_at", 0))
+                   item.get("label", ""), item.get("created"))
 
 
 def become_speaker():
@@ -1722,19 +1512,8 @@ def drain_pending(cfg=None):
             # it off rather than being talked over for another ten seconds.
             interrupt = lambda: hold_reason(cfg)
 
-            # Progress is recorded as each chunk finishes, on the item we may
-            # have to requeue and in the in-flight record, so a pause that kills
-            # this process still knows where it had got to.
-            progress = {"at": int(item.get("resume_at") or 0)}
-
-            def note(next_index, _item=item):
-                progress["at"] = next_index
-                _item["resume_at"] = next_index
-                set_inflight(_item)
-
             set_inflight(item)
-            result = speak(announced, cfg, guard=guard, interrupt=interrupt,
-                           start_at=progress["at"], on_progress=note)
+            result = speak(announced, cfg, guard=guard, interrupt=interrupt)
             clear_inflight()
 
             if result == "interrupted":
@@ -1742,13 +1521,11 @@ def drain_pending(cfg=None):
                 # out a call or dictation and speaks it once that clears. Exiting
                 # here meant a summary sat silent until the next turn, which is
                 # not what "it stopped because you picked up" should mean.
-                item["resume_at"] = progress["at"]
                 requeue(item)
-                log_problem("cut off at chunk %d (%s); requeued, will retry"
-                            % (progress["at"] + 1, hold_reason(cfg) or "stopped"))
+                log_problem("cut off mid-sentence (%s); requeued, will retry"
+                            % (hold_reason(cfg) or "stopped"))
                 continue
             if result == "deferred":
-                item["resume_at"] = progress["at"]
                 # Held mid-synthesis. Put it back, unless this window produced a
                 # newer summary in the meantime -- then the newer one stands.
                 requeue(item)
@@ -1758,7 +1535,6 @@ def drain_pending(cfg=None):
             heard_labels.add(label)
     finally:
         release_speaker()
-        synth_server_stop()      # the model is only worth holding while draining
 
 
 def read_hook_input():

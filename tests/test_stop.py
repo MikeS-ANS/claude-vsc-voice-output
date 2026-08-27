@@ -18,8 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import voice_lib as vl
 from _isolate import isolate, stub_synthesis
 
-isolate(vl)          # private state dir; no cross-suite leakage
-stub_synthesis(vl)   # instant, silent synthesis
+isolate(vl)                         # private state dir; no cross-suite leakage
 
 vl.workstation_locked = lambda: False
 vl.microphone_in_use = lambda cfg=None: False
@@ -121,6 +120,7 @@ def fake_play(wav, interrupt_check=None, poll=0.5, **kw):
 
 real_play = vl._play_wav
 vl._play_wav = fake_play
+stub_synthesis(vl)
 
 result = vl.speak("cut me off", {"engine": "kokoro", "rate": 1.0},
                   guard=lambda: True, interrupt=lambda: "the microphone is in use")
@@ -183,6 +183,7 @@ vl.set_paused()
 real_play2 = vl._play_wav
 vl._play_wav = lambda wav, interrupt_check=None, poll=0.5, **kw: (
     interrupt_check() if interrupt_check else True)
+stub_synthesis(vl)
 result = vl.speak("stop me", {"engine": "kokoro", "rate": 1.0},
                   guard=lambda: True, interrupt=lambda: vl.hold_reason({}))
 checks.append(("pausing mid-sentence interrupts playback", result == "interrupted"))

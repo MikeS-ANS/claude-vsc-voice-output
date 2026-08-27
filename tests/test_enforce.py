@@ -21,8 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import voice_lib as vl
 from _isolate import isolate, stub_synthesis
 
-isolate(vl)          # private state dir; no cross-suite leakage
-stub_synthesis(vl)   # instant, silent synthesis
+isolate(vl)                         # private state dir; no cross-suite leakage
 
 # The isolated config from isolate(), not the user's real one -- this suite
 # rewrites it repeatedly, and the spawned hook reads it via CLAUDE_VOICE_CONFIG.
