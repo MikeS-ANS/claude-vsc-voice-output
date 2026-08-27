@@ -13,6 +13,7 @@ spoken = []
 vl.speak = lambda text, cfg=None, guard=None: spoken.append(text)
 vl.microphone_in_use = lambda cfg=None: False
 vl.microphone_blockers = lambda cfg=None: []
+vl.state_dir()                      # a fresh clone has no state dir yet
 
 locked = {"v": True}
 vl.workstation_locked = lambda: locked["v"]

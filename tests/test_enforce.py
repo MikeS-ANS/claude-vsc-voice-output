@@ -40,6 +40,14 @@ def fresh():
         f.write(str(time.time() - 5))
 
 
+vl.state_dir()                      # a fresh clone has no state dir yet
+
+# A fresh clone has no live config -- only the shipped default. Seed one so the
+# suite can run before install.py has ever been executed.
+if not os.path.isfile(CFG_PATH):
+    shutil.copy(os.path.join(HOOKS, "voice-config.default.json"), CFG_PATH)
+    print("seeded voice-config.json from the shipped default")
+
 shutil.copy(CFG_PATH, CFG_PATH + ".orig")
 checks = []
 try:

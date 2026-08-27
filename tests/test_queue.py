@@ -12,6 +12,7 @@ import voice_lib as vl
 # These suites test queue/mic logic, not lock handling, and may run on a
 # locked machine -- pin the lock signal off.
 vl.workstation_locked = lambda: False
+vl.state_dir()                      # a fresh clone has no state dir yet
 
 spoken = []
 vl.speak = lambda text, cfg=None, guard=None: spoken.append(text)

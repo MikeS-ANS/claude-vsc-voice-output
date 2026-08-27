@@ -644,7 +644,7 @@ def _mic_scan(root, path, out, depth=0):
             elif name == "LastUsedTimeStop":
                 stop = val
         if start and not stop:
-            out.append(path.split(chr(92))[-1])
+            out.append((path.split(chr(92))[-1], start))
         for i in range(n_sub):
             try:
                 _mic_scan(root, path + chr(92) + winreg.EnumKey(key, i), out, depth + 1)
@@ -654,6 +654,10 @@ def _mic_scan(root, path, out, depth=0):
 
 def microphone_users():
     """Names of apps currently holding the microphone (empty when nothing is)."""
+    return [name for name, _start in _mic_holders_raw()]
+
+
+def _mic_holders_raw():
     import winreg
     found = []
     try:
@@ -661,6 +665,38 @@ def microphone_users():
     except Exception:
         pass
     return found
+
+
+_FILETIME_EPOCH = 11644473600       # seconds between 1601-01-01 and 1970-01-01
+
+
+def microphone_holders():
+    """Apps holding the mic now, as [(name, seconds_held)], longest first.
+
+    How long it has been held is what separates a live call from an app that
+    simply keeps the device open for its own convenience: a call lasts minutes,
+    a headset or mouse companion app holds it for days. The gate cannot tell
+    those apart, so the duration is what makes an always-on holder findable.
+    """
+    now_ft = (time.time() + _FILETIME_EPOCH) * 10000000.0
+    out = []
+    for name, start in _mic_holders_raw():
+        try:
+            held = max(0.0, (now_ft - float(start)) / 10000000.0)
+        except (TypeError, ValueError):
+            held = 0.0
+        out.append((name, held))
+    out.sort(key=lambda pair: -pair[1])
+    return out
+
+
+def mic_app_label(name):
+    """Registry leaf -> a name worth showing and matching on.
+
+    'C:#Program Files#LGHUB#lghub_agent.exe' -> 'lghub_agent'
+    """
+    leaf = str(name).split(chr(35))[-1]
+    return leaf[:-4] if leaf.lower().endswith(".exe") else leaf
 
 
 # Apps that hold the microphone continuously rather than only during a call.
