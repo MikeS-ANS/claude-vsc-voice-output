@@ -5,6 +5,7 @@
   python voice-say.py --file F             speak the contents of a file
   python voice-say.py --drain              worker mode, used by the hooks
   python voice-say.py --mic                report what is holding the microphone
+  python voice-say.py --diagnose           check the whole audio path out loud
 """
 
 import os
@@ -25,6 +26,17 @@ def main():
     if "--drain" in args:
         vl.drain_pending()
         return 0
+
+    if "--diagnose" in args:
+        # Errors are printed here rather than swallowed: showing what is wrong is
+        # the entire point of this mode, and __main__ deliberately exits 0 on any
+        # exception so that a voice bug can never wedge a turn.
+        try:
+            return vl.diagnose()
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            return 1
 
     delete_after = "--delete-after" in args
     args = [a for a in args if a != "--delete-after"]

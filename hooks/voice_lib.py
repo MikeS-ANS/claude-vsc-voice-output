@@ -340,6 +340,101 @@ KOKORO_SYNTH = os.path.join(HOOKS_DIR, "kokoro_synth.py")
 
 _PLAY_WAV_PS = """
 $ErrorActionPreference = 'Stop'
+
+# Force this process's own Volume Mixer level up before playing.
+#
+# A per-app volume of 0 silences the audio while every layer still reports
+# success: PlaySync blocks for the clip's full duration and the process exits 0,
+# so voice-spoken.log records "spoke" for something nobody heard. That cost a
+# full day of silent summaries on 2026-09-02 before it was found by hand.
+#
+# powershell.exe and python.exe get SEPARATE mixer rows, so this has to happen
+# in the process that actually plays -- Python cannot fix it from outside.
+#
+# Never fatal: any failure here still lets the audio through, and the reason is
+# written to CV_STATUS_FILE for _log_audio_status to report.
+$cvStatus = 'volume-check-skipped'
+try {
+    Add-Type -ErrorAction Stop -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public class CvVol {
+  [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] internal class DevEnum { }
+  [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  internal interface IMMDeviceEnumerator { int f1(); int GetDefaultAudioEndpoint(int flow, int role, out IMMDevice d); }
+  [Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  internal interface IMMDevice { int Activate(ref Guid iid, int ctx, IntPtr p, [MarshalAs(UnmanagedType.IUnknown)] out object o); }
+  [Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  internal interface IAudioSessionManager2 {
+    int GetAudioSessionControl_(IntPtr a, int b, [MarshalAs(UnmanagedType.IUnknown)] out object c);
+    int GetSimpleAudioVolume(IntPtr guid, int crossProcess, [MarshalAs(UnmanagedType.IUnknown)] out object v);
+  }
+  [Guid("87CE5498-68D6-44E5-9215-6DA47EF883D8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  internal interface ISimpleAudioVolume {
+    int SetMasterVolume(float v, ref Guid g);
+    int GetMasterVolume(out float v);
+    int SetMute(bool m, ref Guid g);
+    int GetMute(out bool m);
+  }
+  [Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  internal interface IAudioEndpointVolume {
+    int f1(); int f2(); int f3(); int f4(); int f5();
+    int GetMasterVolumeLevel(out float f);
+    int GetMasterVolumeLevelScalar(out float f);
+    int f8(); int f9(); int f10(); int f11();
+    int SetMute(bool m, ref Guid g);
+    int GetMute(out bool m);
+  }
+
+  public static string Ensure() {
+    var en = (IMMDeviceEnumerator)(new DevEnum());
+    IMMDevice dev;
+    if (en.GetDefaultAudioEndpoint(0, 0, out dev) != 0) return "no-default-device";
+
+    // The DEVICE level is reported but never changed -- muting the machine is a
+    // deliberate act and speech must not override it.
+    string note = " device=unknown";
+    try {
+      Guid ev = typeof(IAudioEndpointVolume).GUID; object eo;
+      dev.Activate(ref ev, 23, IntPtr.Zero, out eo);
+      var epv = (IAudioEndpointVolume)eo;
+      bool dm; float dv;
+      epv.GetMute(out dm); epv.GetMasterVolumeLevelScalar(out dv);
+      note = string.Format(" device={0:N0}%{1}", dv * 100, dm ? " DEVICE-MUTED" : "");
+    } catch { }
+
+    Guid iid = typeof(IAudioSessionManager2).GUID; object o;
+    if (dev.Activate(ref iid, 23, IntPtr.Zero, out o) != 0) return "no-session-manager" + note;
+    var mgr = (IAudioSessionManager2)o;
+    object svo;
+    // NULL session guid + 0 = this process's own session, so no enumeration is
+    // needed. Enumerating sessions was tried first and proved unreliable here
+    // (IAudioSessionControl2 QueryInterface returned E_NOINTERFACE).
+    if (mgr.GetSimpleAudioVolume(IntPtr.Zero, 0, out svo) != 0) return "no-session-volume" + note;
+    var sav = (ISimpleAudioVolume)svo;
+
+    float v; bool m;
+    sav.GetMasterVolume(out v); sav.GetMute(out m);
+    string was = string.Format("app={0:N0}%{1}", v * 100, m ? " APP-MUTED" : "");
+    if (v < 0.99f || m) {
+      Guid g = Guid.Empty;
+      sav.SetMute(false, ref g);
+      sav.SetMasterVolume(1.0f, ref g);
+      float v2; sav.GetMasterVolume(out v2);
+      return string.Format("RAISED {0} -> {1:N0}%{2}", was, v2 * 100, note);
+    }
+    return "ok " + was + note;
+  }
+}
+'@
+    $cvStatus = [CvVol]::Ensure()
+} catch {
+    $cvStatus = 'volume-check-failed: ' + $_.Exception.Message
+}
+if ($env:CV_STATUS_FILE) {
+    try { [IO.File]::WriteAllText($env:CV_STATUS_FILE, $cvStatus) } catch { }
+}
+
 $p = New-Object System.Media.SoundPlayer $env:CV_WAV_FILE
 $p.PlaySync()
 $p.Dispose()
@@ -384,6 +479,45 @@ def _synth_kokoro(text_file, wav, voice, rate):
     return True
 
 
+_LAST_AUDIO_STATUS = ""
+
+
+def last_audio_status():
+    """What the most recent playback reported about the Windows mixer."""
+    return _LAST_AUDIO_STATUS
+
+
+def _log_audio_status(path):
+    """Surface what the player found in the Windows Volume Mixer.
+
+    This is the only thing standing between a silenced app and silence that
+    looks like success. A per-app volume of 0 makes PlaySync block for the
+    clip's whole duration and exit 0, so "it played" and "it was audible" come
+    apart with nothing to tell them apart -- voice-spoken.log said "spoke" for
+    an entire day of silence before this existed (2026-09-02).
+
+    A muted DEVICE is reported but never changed, and never held for: muting the
+    machine is deliberate, and holding speech would build the same backlog the
+    locked-screen path exists to avoid.
+    """
+    global _LAST_AUDIO_STATUS
+    try:
+        # PowerShell's WriteAllText can emit a BOM; utf-8-sig eats it.
+        with open(path, "r", encoding="utf-8-sig") as f:
+            note = f.read().strip()
+    except OSError:
+        return
+    if not note:
+        return
+    _LAST_AUDIO_STATUS = note
+    if note.startswith("RAISED"):
+        log_problem("the Volume Mixer had this app silenced; raised it (%s)" % note)
+    elif "DEVICE-MUTED" in note:
+        log_problem("the output device is muted, so nothing was audible (%s)" % note)
+    elif not note.startswith("ok"):
+        log_problem("could not verify the output volume (%s)" % note)
+
+
 def _play_wav(wav, interrupt_check=None, poll=0.5):
     """Play a WAV file.
 
@@ -391,32 +525,48 @@ def _play_wav(wav, interrupt_check=None, poll=0.5):
     interrupt_check said to stop partway. PlaySync blocks for the whole
     utterance, so interrupting means killing the player -- which is the only way
     to react to a call that starts mid-sentence.
+
+    True means the player exited 0, which is NOT the same as "you heard it".
+    See _log_audio_status for the failure that taught us the difference.
     """
-    if interrupt_check is None:
-        return run_powershell(_PLAY_WAV_PS, {"CV_WAV_FILE": wav})
-
-    env = dict(os.environ, CV_WAV_FILE=wav)
+    fd, status = tempfile.mkstemp(prefix="cv-vol-", suffix=".txt", dir=state_dir())
+    os.close(fd)
     try:
-        proc = subprocess.Popen(
-            [powershell(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-             "-Command", _PLAY_WAV_PS],
-            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=_CREATE_NO_WINDOW)
-    except Exception as exc:
-        log_problem("could not start playback: %r" % (exc,))
-        return False
+        if interrupt_check is None:
+            ok = run_powershell(_PLAY_WAV_PS,
+                                {"CV_WAV_FILE": wav, "CV_STATUS_FILE": status})
+            _log_audio_status(status)
+            return ok
 
-    while proc.poll() is None:
-        reason = interrupt_check()
-        if reason:
-            _kill_tree(proc.pid, image="powershell.exe")
-            try:
-                proc.wait(timeout=5)
-            except Exception:
-                pass
-            return reason
-        time.sleep(poll)
-    return proc.returncode == 0
+        env = dict(os.environ, CV_WAV_FILE=wav, CV_STATUS_FILE=status)
+        try:
+            proc = subprocess.Popen(
+                [powershell(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                 "-Command", _PLAY_WAV_PS],
+                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=_CREATE_NO_WINDOW)
+        except Exception as exc:
+            log_problem("could not start playback: %r" % (exc,))
+            return False
+
+        while proc.poll() is None:
+            reason = interrupt_check()
+            if reason:
+                _kill_tree(proc.pid, image="powershell.exe")
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
+                _log_audio_status(status)
+                return reason
+            time.sleep(poll)
+        _log_audio_status(status)
+        return proc.returncode == 0
+    finally:
+        try:
+            os.unlink(status)
+        except OSError:
+            pass
 
 
 def speak(text, cfg=None, guard=None, interrupt=None):
@@ -1543,3 +1693,72 @@ def read_hook_input():
         return json.loads(raw) if raw else {}
     except Exception:
         return {}
+
+def diagnose():
+    """Print the whole speech path, then speak a test line.
+
+    Exists because the failure that prompted it was invisible from the logs: a
+    per-app Volume Mixer level of 0 silenced every summary for a day while
+    voice-spoken.log recorded "spoke" each time. Everything here is read live
+    rather than remembered, and the test line goes through the real speak()
+    path so the mixer report comes from the process that actually plays.
+    """
+    cfg = load_config()
+    print("Claude Code voice -- diagnostic")
+
+    print("")
+    print("config")
+    for key in ("speak", "always_speak", "toast", "engine", "voice", "rate",
+                "away_seconds", "idle_seconds", "respect_lock",
+                "respect_microphone", "push_when_away"):
+        print("  %-20s %s" % (key, cfg.get(key)))
+
+    print("")
+    print("engines")
+    print("  %-20s %s" % ("kokoro installed", kokoro_available()))
+    voices = kokoro_voices()
+    print("  %-20s %d" % ("kokoro voices", len(voices)))
+    want = (cfg.get("voice") or "").strip()
+    if voices:
+        found = "found" if want in voices else "NOT FOUND -- will fall back"
+        print("  %-20s %s (%s)" % ("configured voice", want, found))
+
+    print("")
+    print("state")
+    print("  %-20s %s" % ("speech paused", is_paused()))
+    print("  %-20s %s" % ("screen locked", workstation_locked()))
+    mic = microphone_users()
+    print("  %-20s %s" % ("microphone", ", ".join(mic) if mic else "free"))
+    print("  %-20s %d" % ("queued summaries", queue_depth()))
+    print("  %-20s %d" % ("os idle seconds", int(os_idle_seconds())))
+
+    print("")
+    print("speaking a test line now...")
+    result = speak("Voice diagnostic. If you can hear this, "
+                   "the whole audio path is working.")
+    print("  %-20s %r" % ("speak() returned", result))
+    note = last_audio_status()
+    print("  %-20s %s" % ("mixer report", note or "(nothing recorded)"))
+
+    if note.startswith("RAISED"):
+        print("")
+        print("  This app had been silenced in the Windows Volume Mixer.")
+        print("  It has been raised back to full. If speech had gone quiet,")
+        print("  that was why -- and it is now fixed.")
+    elif "DEVICE-MUTED" in note:
+        print("")
+        print("  Your output device is MUTED. Nothing will be audible until you")
+        print("  unmute it. That is deliberately not changed for you.")
+
+    print("")
+    print("last few problems (voice-errors.log)")
+    try:
+        with open(ERROR_LOG, "r", encoding="utf-8") as f:
+            lines = f.read().strip().splitlines()[-8:]
+        for line in lines:
+            print("  " + line)
+        if not lines:
+            print("  (none)")
+    except OSError:
+        print("  (none)")
+    return 0

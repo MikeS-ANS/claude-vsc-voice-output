@@ -37,6 +37,7 @@ cd $env:USERPROFILE\.claude\hooks
 | Change speaking speed | `python voice-voices.py --rate 1.15` |
 | Say something out loud right now | `python voice-say.py "build finished"` |
 | Find out why it went quiet | `type voice-errors.log` |
+| **Check the whole audio path** | `python voice-say.py --diagnose` |
 
 > **Config changes apply instantly, in every open window.** No restart, no reload.
 
@@ -147,6 +148,9 @@ time. Speech also serialises behind a lock, so several quick turns in a row will
 
 Three situations where narration would be wrong. In all of them the summary is **held,
 never discarded** — you hear it when the moment passes.
+
+There is also a fourth cause that is *not* deliberate, and it used to be invisible —
+see [Windows silenced the app](#windows-silenced-the-app) below.
 
 ### Your screen is locked
 
@@ -459,7 +463,12 @@ microphone, and what is sitting in the queue. That answers most cases outright.
 `voice-spoken.log` records every utterance as `spoke` or `deferred` with a timestamp, so
 "did it talk over me?" is answerable rather than a guess. `voice-errors.log` records
 every reason speech did not happen — a held summary, a failed engine, Kokoro's own error
-output. **An empty error log means speech never failed; it was never triggered.**
+output.
+
+**A `spoke` entry means the player exited cleanly. It is not proof you heard anything.**
+The two came apart badly once: see [Windows silenced the app](#windows-silenced-the-app).
+An empty error log usually means speech was never triggered rather than that it failed,
+but treat that as the likely case, not a guarantee.
 
 ### No toast notifications
 
@@ -479,10 +488,43 @@ are dropping stale audio when a newer summary arrives, or keeping a warm model p
 ### Verify the whole chain
 
 ```powershell
-python voice-say.py "testing one two three"    # speech
-python voice-voices.py                         # engines and voices visible
-python voice-toggle.py                         # current state
+python voice-say.py --diagnose
 ```
+
+One command. It reads the config, checks Kokoro is installed and that your configured
+voice actually exists, reports the lock/microphone/queue state, then speaks a test line
+through the real speech path and tells you what the Windows mixer did with it. Every
+value is read live rather than remembered, and it finishes with the tail of the error
+log.
+
+<a name="windows-silenced-the-app"></a>
+
+### Windows silenced the app
+
+Windows keeps a **separate volume slider per application** in its Volume Mixer. If the
+one for PowerShell reaches zero, speech is rendered and then multiplied by zero on its
+way to the speakers. Nothing looks wrong from the inside: playback blocks for the
+clip's full duration, the player exits 0, and `voice-spoken.log` records `spoke`.
+
+This happened on 2026-09-02 and cost a full day of silent summaries while notification
+dings kept working — dings come from `python.exe`, speech from `powershell.exe`, and
+each gets its own mixer row.
+
+**The player now raises its own level to full before every clip and logs it when it has
+to.** Look for a line like this in `voice-errors.log`:
+
+```
+the Volume Mixer had this app silenced; raised it (RAISED app=0% -> 100% device=54%)
+```
+
+Seeing that means it fixed itself. Seeing it repeatedly means something on the machine
+keeps zeroing it — dictation and meeting apps duck other applications by design, so
+that is where to look.
+
+A muted **device** (the machine-wide mute, not the per-app slider) is reported the same
+way but deliberately never changed, and speech is not held for it. Muting your machine
+is a decision, and holding speech would build the same backlog the locked-screen path
+exists to avoid. The log line reads `DEVICE-MUTED`.
 
 ---
 
