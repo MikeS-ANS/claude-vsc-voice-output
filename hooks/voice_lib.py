@@ -19,6 +19,19 @@ STATE_DIR = os.environ.get("CLAUDE_VOICE_STATE",
 LOCK_PATH = os.path.join(STATE_DIR, "speak.lock")
 
 
+def silenced():
+    """True when this session must never speak, regardless of config.
+
+    Set by unattended background runs (the scheduled CLAUDE.md review) that are
+    real Claude Code sessions and so fire the same Stop hook an interactive turn
+    does. Without this they narrate their own bookkeeping out loud, which is
+    what turned a queue of stuck reviews into a burst of speech every 4 hours.
+    An env var is the signal because the hook runs as a child of that session
+    and inherits it; nothing in the hook payload distinguishes headless runs.
+    """
+    return os.environ.get("CLAUDE_VOICE_SILENT", "").strip().lower() not in ("", "0", "false", "no")
+
+
 def audio_lock_path():
     """The audio device lock file.
 
@@ -954,6 +967,19 @@ def microphone_users():
 
 
 def _mic_holders_raw():
+    """[(name, start_filetime)] for every app holding the mic right now.
+
+    Core Audio is the source of truth; the registry is only a fallback for when
+    Core Audio itself cannot be queried. Windows 11 26H2 (KB5121794, 2026-10-05)
+    stopped writing live usage to the registry key: a test that recorded 10s of
+    audio left it byte-identical, so every call since then went undetected and
+    speech talked over meetings. A frozen key is worse than an empty one -- an
+    entry caught mid-call with no stop time would hold speech forever -- which
+    is why it is not merged in when Core Audio answers.
+    """
+    found = _capture_sessions_active()
+    if found is not None:
+        return found
     import winreg
     found = []
     try:
@@ -961,6 +987,145 @@ def _mic_holders_raw():
     except Exception:
         pass
     return found
+
+
+# Core Audio: every process recording from an active capture device has an
+# audio session on it, and its state is Active only while the stream runs. Apps
+# merely open (Teams, Zoom, Wispr Flow between dictations) show Inactive. This
+# is a plain vtable walk in ctypes -- the C# interop in the PowerShell volume
+# helper hit E_NOINTERFACE on IAudioSessionControl2, which does not happen here.
+_k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_k32.OpenProcess.restype = wintypes.HANDLE
+_k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+_k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+_k32.QueryFullProcessImageNameW.argtypes = (wintypes.HANDLE, wintypes.DWORD,
+                                            wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD))
+_k32.GetProcessTimes.argtypes = (wintypes.HANDLE,) + (ctypes.POINTER(ctypes.c_ulonglong),) * 4
+_ole32 = ctypes.WinDLL("ole32")
+_ole32.CoInitializeEx.restype = ctypes.c_long
+_ole32.CoInitializeEx.argtypes = (ctypes.c_void_p, wintypes.DWORD)
+_ole32.CoCreateInstance.restype = ctypes.c_long
+_ole32.CoCreateInstance.argtypes = (ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD,
+                                    ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))
+
+_CLSID_MMDeviceEnumerator = "BCDE0395-E52F-467C-8E3D-C4579291692E"
+_IID_IMMDeviceEnumerator = "A95664D2-9614-4F35-A746-DE8DB63617E6"
+_IID_IAudioSessionManager2 = "77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F"
+_IID_IAudioSessionControl2 = "BFB7FF88-7239-4FC9-8FA2-07C950BE9C6D"
+_E_CAPTURE, _DEVICE_STATE_ACTIVE, _SESSION_ACTIVE, _CLSCTX_ALL = 1, 1, 1, 23
+_RPC_E_CHANGED_MODE = -2147417850
+
+
+def _guid(text):
+    import uuid
+    return (ctypes.c_ubyte * 16).from_buffer_copy(uuid.UUID(text).bytes_le)
+
+
+def _com(obj, index, argtypes, *args):
+    """Call vtable slot `index` of COM pointer `obj`; returns the HRESULT."""
+    vtbl = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+    fn = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, *argtypes)(vtbl[index])
+    return fn(obj, *args)
+
+
+def _com_release(obj):
+    if obj and obj.value:
+        _com(obj, 2, ())
+
+
+def _process_identity(pid):
+    """(registry-style name, creation FILETIME) for a pid, or None.
+
+    The name mirrors the registry's NonPackaged leaf ('C:#Program Files#...'),
+    so mic_app_label and existing microphone_ignore patterns keep matching.
+    """
+    handle = _k32.OpenProcess(0x1000, False, pid)   # QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        size = wintypes.DWORD(1024)
+        if not _k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return None
+        created, x1, x2, x3 = (ctypes.c_ulonglong() for _ in range(4))
+        ok = _k32.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(x1),
+                                  ctypes.byref(x2), ctypes.byref(x3))
+        return buf.value.replace(chr(92), chr(35)), (created.value if ok else None)
+    finally:
+        _k32.CloseHandle(handle)
+
+
+def _capture_sessions_active():
+    """[(name, start_filetime)] from Core Audio, or None if it can't be queried.
+
+    Core Audio has no "recording since" time, so the start reported is the
+    process's creation time: an upper bound on how long it has held the mic.
+    That only feeds install.py's always-on check, which asks before ignoring.
+    """
+    hr_init = _ole32.CoInitializeEx(None, 0)       # COINIT_MULTITHREADED
+    if hr_init < 0 and hr_init != _RPC_E_CHANGED_MODE:
+        return None
+    P = ctypes.c_void_p
+    PP = ctypes.POINTER(P)
+    LONG_P = ctypes.POINTER(ctypes.c_long)
+    en, coll = P(), P()
+    found, seen = [], set()
+    try:
+        if _ole32.CoCreateInstance(_guid(_CLSID_MMDeviceEnumerator), None, _CLSCTX_ALL,
+                                   _guid(_IID_IMMDeviceEnumerator), ctypes.byref(en)) < 0:
+            return None
+        if _com(en, 3, (ctypes.c_int, wintypes.DWORD, PP),
+                _E_CAPTURE, _DEVICE_STATE_ACTIVE, ctypes.byref(coll)) < 0:
+            return None
+        n_dev = ctypes.c_uint()
+        _com(coll, 3, (ctypes.POINTER(ctypes.c_uint),), ctypes.byref(n_dev))
+        iid_mgr = _guid(_IID_IAudioSessionManager2)
+        iid_ctl2 = _guid(_IID_IAudioSessionControl2)
+        for d in range(n_dev.value):
+            dev, mgr, sessions = P(), P(), P()
+            try:
+                if _com(coll, 4, (ctypes.c_uint, PP), d, ctypes.byref(dev)) < 0:
+                    continue
+                if _com(dev, 3, (P, wintypes.DWORD, P, PP), ctypes.cast(iid_mgr, P),
+                        _CLSCTX_ALL, None, ctypes.byref(mgr)) < 0:
+                    continue
+                if _com(mgr, 5, (PP,), ctypes.byref(sessions)) < 0:
+                    continue
+                n_ses = ctypes.c_int()
+                _com(sessions, 3, (ctypes.POINTER(ctypes.c_int),), ctypes.byref(n_ses))
+                for i in range(n_ses.value):
+                    ctl, ctl2 = P(), P()
+                    try:
+                        if _com(sessions, 4, (ctypes.c_int, PP), i, ctypes.byref(ctl)) < 0:
+                            continue
+                        state = ctypes.c_long(0)
+                        _com(ctl, 3, (LONG_P,), ctypes.byref(state))
+                        if state.value != _SESSION_ACTIVE:
+                            continue
+                        if _com(ctl, 0, (P, PP), ctypes.cast(iid_ctl2, P), ctypes.byref(ctl2)) < 0:
+                            continue
+                        pid = wintypes.DWORD(0)
+                        _com(ctl2, 14, (ctypes.POINTER(wintypes.DWORD),), ctypes.byref(pid))
+                        if not pid.value or pid.value in seen:
+                            continue
+                        seen.add(pid.value)
+                        ident = _process_identity(pid.value)
+                        found.append(ident if ident else ("pid %d" % pid.value, None))
+                    finally:
+                        _com_release(ctl2)
+                        _com_release(ctl)
+            finally:
+                _com_release(sessions)
+                _com_release(mgr)
+                _com_release(dev)
+        return found
+    except Exception:
+        return None
+    finally:
+        _com_release(coll)
+        _com_release(en)
+        if hr_init >= 0:
+            _ole32.CoUninitialize()
 
 
 _FILETIME_EPOCH = 11644473600       # seconds between 1601-01-01 and 1970-01-01
@@ -1561,6 +1726,8 @@ def resume_speaking():
 def say_detached(text, session_id="default", cwd=""):
     """Queue text for this session and ensure something is draining the queue."""
     if not text.strip():
+        return False
+    if silenced():
         return False
     if not enqueue(text, session_id, session_label(session_id, cwd)):
         return False

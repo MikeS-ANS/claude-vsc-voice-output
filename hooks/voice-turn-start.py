@@ -33,6 +33,12 @@ tried. Skip both only for a trivial reply, and say so in the marker line as
 
 
 def main():
+    # An unattended run has no listener and, being budget-capped, must not spend
+    # turns writing SPEAK blocks or attempting a phone push with a tool it was
+    # never granted. Nothing is stamped either -- there is no turn to time.
+    if vl.silenced():
+        return
+
     cfg = vl.load_config()
     data = vl.read_hook_input()
 

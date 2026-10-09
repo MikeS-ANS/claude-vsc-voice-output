@@ -7,8 +7,8 @@ you walk away, the summary follows you to your phone instead.
 
 Everything runs locally. No API keys, no cloud speech service, no audio leaves the machine.
 
-> **Windows only.** This uses Windows speech APIs, Windows toast notifications, the Windows
-> microphone privacy registry, and `winsound`. It will not work on macOS or Linux.
+> **Windows only.** This uses Windows speech APIs, Windows toast notifications, Windows Core
+> Audio (to see which apps are recording), and `winsound`. It will not work on macOS or Linux.
 
 ---
 

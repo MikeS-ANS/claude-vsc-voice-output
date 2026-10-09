@@ -40,6 +40,12 @@ MAX_NUDGES = 1
 
 
 def main():
+    # Checked before anything else: an unattended run must not be nudged into
+    # writing a SPEAK block either, since that spends its budget on speech
+    # nobody will hear.
+    if vl.silenced():
+        return 0
+
     cfg = vl.load_config()
     if not cfg.get("speak", True):
         return 0

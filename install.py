@@ -205,7 +205,7 @@ def check_microphone():
     for name, held in stuck:
         label = vl.mic_app_label(name)
         known = any(str(pat).lower() in label.lower() for pat in ignore)
-        say(" %s has held the microphone for %s%s"
+        say(" %s is holding the microphone (for up to %s)%s"
             % (label, _duration(held), "  (already ignored)" if known else ""))
         if not known:
             fresh.append(label)
